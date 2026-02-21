@@ -48,4 +48,8 @@ const std::unordered_map<std::string, InfosetNode>& InfosetTable::Nodes() const 
   return nodes_;
 }
 
+std::unordered_map<std::string, InfosetNode>& InfosetTable::MutableNodes() noexcept {
+  return nodes_;
+}
+
 }  // namespace plarbius::cfr

@@ -6,6 +6,14 @@ param(
   [int]$Iterations = 50000,
   [int]$CheckpointEvery = 5000,
   [double]$MccfrSamplingEpsilon = 0.3,
+  [switch]$MccfrLcfrDiscount,
+  [int]$MccfrLcfrStart = 2000,
+  [int]$MccfrLcfrInterval = 1,
+  [switch]$MccfrPruneActions,
+  [int]$MccfrPruneStart = 20000,
+  [double]$MccfrPruneThreshold = 0.000001,
+  [int]$MccfrPruneMinActions = 2,
+  [int]$MccfrPruneFullTraversalInterval = 5000,
   [int]$HandHistoryHands = 20000,
   [int]$HandHistoryBaseSeed = 1,
   [switch]$SkipHandHistory,
@@ -81,6 +89,22 @@ foreach ($algo in $algoList) {
 
     if ($algo -eq "mccfr") {
       $cliArgs += @("--sampling-epsilon", $MccfrSamplingEpsilon.ToString("0.###############"))
+      if ($MccfrLcfrDiscount) {
+        $cliArgs += @(
+          "--lcfr-discount",
+          "--lcfr-start", $MccfrLcfrStart.ToString(),
+          "--lcfr-interval", $MccfrLcfrInterval.ToString()
+        )
+      }
+      if ($MccfrPruneActions) {
+        $cliArgs += @(
+          "--prune-actions",
+          "--prune-start", $MccfrPruneStart.ToString(),
+          "--prune-threshold", $MccfrPruneThreshold.ToString("0.###############"),
+          "--prune-min-actions", $MccfrPruneMinActions.ToString(),
+          "--prune-full-interval", $MccfrPruneFullTraversalInterval.ToString()
+        )
+      }
     }
 
     Write-Host "Running: algo=$algo seed=$seed iterations=$Iterations"

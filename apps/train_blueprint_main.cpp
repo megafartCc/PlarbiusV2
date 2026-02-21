@@ -92,6 +92,10 @@ void PrintUsage() {
   std::cout << "Usage:\n"
             << "  plarbius_train [iterations] [--algo cfr+|mccfr] [--game kuhn|leduc]\n"
             << "                 [--seed N] [--sampling-epsilon X]\n"
+            << "                 [--lcfr-discount] [--lcfr-start N] [--lcfr-interval N]\n"
+            << "                 [--lcfr-no-strategy-discount]\n"
+            << "                 [--prune-actions] [--prune-start N] [--prune-threshold X]\n"
+            << "                 [--prune-min-actions N] [--prune-full-interval N]\n"
             << "                 [--checkpoint path] [--checkpoint-every N] [--resume path]\n"
             << "                 [--log-interval N] [--avg-delay N]\n"
             << "                 [--metrics-out path] [--metrics-interval N]\n"
@@ -140,6 +144,44 @@ CliOptions ParseCli(int argc, char** argv) {
         throw std::invalid_argument("Missing value for --sampling-epsilon.");
       }
       options.config.sampling_epsilon = ParseDouble(argv[index++], "--sampling-epsilon");
+    } else if (flag == "--lcfr-discount") {
+      options.config.mccfr_use_lcfr_discount = true;
+    } else if (flag == "--lcfr-start") {
+      if (index >= argc) {
+        throw std::invalid_argument("Missing value for --lcfr-start.");
+      }
+      options.config.mccfr_lcfr_discount_start = ParseUnsigned(argv[index++], "--lcfr-start");
+    } else if (flag == "--lcfr-interval") {
+      if (index >= argc) {
+        throw std::invalid_argument("Missing value for --lcfr-interval.");
+      }
+      options.config.mccfr_lcfr_discount_interval = ParseUnsigned(argv[index++], "--lcfr-interval");
+    } else if (flag == "--lcfr-no-strategy-discount") {
+      options.config.mccfr_lcfr_discount_strategy_sum = false;
+    } else if (flag == "--prune-actions") {
+      options.config.mccfr_enable_pruning = true;
+    } else if (flag == "--prune-start") {
+      if (index >= argc) {
+        throw std::invalid_argument("Missing value for --prune-start.");
+      }
+      options.config.mccfr_prune_start = ParseUnsigned(argv[index++], "--prune-start");
+    } else if (flag == "--prune-threshold") {
+      if (index >= argc) {
+        throw std::invalid_argument("Missing value for --prune-threshold.");
+      }
+      options.config.mccfr_prune_regret_threshold = ParseDouble(argv[index++], "--prune-threshold");
+    } else if (flag == "--prune-min-actions") {
+      if (index >= argc) {
+        throw std::invalid_argument("Missing value for --prune-min-actions.");
+      }
+      options.config.mccfr_prune_min_actions =
+          static_cast<std::size_t>(ParseUnsigned(argv[index++], "--prune-min-actions"));
+    } else if (flag == "--prune-full-interval") {
+      if (index >= argc) {
+        throw std::invalid_argument("Missing value for --prune-full-interval.");
+      }
+      options.config.mccfr_prune_full_traversal_interval =
+          ParseUnsigned(argv[index++], "--prune-full-interval");
     } else if (flag == "--checkpoint") {
       if (index >= argc) {
         throw std::invalid_argument("Missing value for --checkpoint.");
@@ -197,6 +239,12 @@ CliOptions ParseCli(int argc, char** argv) {
 
   if (options.config.iterations == 0) {
     throw std::invalid_argument("iterations must be > 0.");
+  }
+  if (options.config.mccfr_lcfr_discount_interval == 0) {
+    options.config.mccfr_lcfr_discount_interval = 1;
+  }
+  if (options.config.mccfr_prune_min_actions == 0) {
+    options.config.mccfr_prune_min_actions = 1;
   }
   if (options.config.log_interval == 0) {
     options.config.log_interval = std::max<std::uint64_t>(1, options.config.iterations / 10);
@@ -317,4 +365,3 @@ int main(int argc, char** argv) {
 
   return 0;
 }
-

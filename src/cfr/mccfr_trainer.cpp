@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -41,9 +42,23 @@ void MccfrTrainer::Train() {
   start << "Starting external-sampling MCCFR on " << game_.Name() << " for " << config_.iterations
         << " iterations with seed=" << config_.seed
         << " and sampling_epsilon=" << config_.sampling_epsilon << '.';
+  if (config_.mccfr_use_lcfr_discount) {
+    start << " lcfr_discount(start=" << config_.mccfr_lcfr_discount_start
+          << ", interval=" << config_.mccfr_lcfr_discount_interval
+          << ", strategy_sum=" << (config_.mccfr_lcfr_discount_strategy_sum ? "on" : "off")
+          << ").";
+  }
+  if (config_.mccfr_enable_pruning) {
+    start << " pruning(start=" << config_.mccfr_prune_start
+          << ", threshold=" << config_.mccfr_prune_regret_threshold
+          << ", min_actions=" << config_.mccfr_prune_min_actions
+          << ", full_interval=" << config_.mccfr_prune_full_traversal_interval
+          << ").";
+  }
   logger_->Info(start.str());
 
   for (std::uint64_t iteration = 1; iteration <= config_.iterations; ++iteration) {
+    ApplyLcfrDiscount(iteration);
     for (std::size_t player = 0; player < kNumPlayers; ++player) {
       auto state = game_.NewInitialState();
       Traverse(*state, static_cast<PlayerId>(player), iteration, 1.0, 1.0);
@@ -95,6 +110,90 @@ void MccfrTrainer::Train() {
 
 const InfosetTable& MccfrTrainer::Table() const noexcept {
   return table_;
+}
+
+void MccfrTrainer::ApplyLcfrDiscount(std::uint64_t iteration) {
+  if (!config_.mccfr_use_lcfr_discount) {
+    return;
+  }
+  if (iteration < config_.mccfr_lcfr_discount_start) {
+    return;
+  }
+  if (config_.mccfr_lcfr_discount_interval > 1 &&
+      (iteration % config_.mccfr_lcfr_discount_interval) != 0) {
+    return;
+  }
+
+  const double scale =
+      static_cast<double>(iteration) / static_cast<double>(iteration + 1ULL);
+  for (auto& [key, node] : table_.MutableNodes()) {
+    (void)key;
+    for (double& regret : node.regret_sum) {
+      regret *= scale;
+    }
+    if (config_.mccfr_lcfr_discount_strategy_sum) {
+      for (double& strategy : node.strategy_sum) {
+        strategy *= scale;
+      }
+    }
+  }
+}
+
+std::vector<bool> MccfrTrainer::BuildPrunedActionMask(const InfosetNode& node,
+                                                      std::size_t action_count,
+                                                      std::uint64_t iteration) const {
+  std::vector<bool> mask(action_count, true);
+  const std::size_t min_actions =
+      std::min<std::size_t>(action_count, std::max<std::size_t>(1, config_.mccfr_prune_min_actions));
+  if (!config_.mccfr_enable_pruning || action_count <= min_actions) {
+    return mask;
+  }
+  if (iteration < config_.mccfr_prune_start) {
+    return mask;
+  }
+  if (config_.mccfr_prune_full_traversal_interval > 0 &&
+      (iteration % config_.mccfr_prune_full_traversal_interval) == 0) {
+    return mask;
+  }
+
+  std::fill(mask.begin(), mask.end(), false);
+  std::size_t best_index = 0;
+  for (std::size_t i = 1; i < action_count; ++i) {
+    if (node.regret_sum[i] > node.regret_sum[best_index]) {
+      best_index = i;
+    }
+  }
+  mask[best_index] = true;
+  for (std::size_t i = 0; i < action_count; ++i) {
+    if (node.regret_sum[i] > config_.mccfr_prune_regret_threshold) {
+      mask[i] = true;
+    }
+  }
+
+  std::size_t selected = 0;
+  for (bool keep : mask) {
+    selected += keep ? 1 : 0;
+  }
+
+  if (selected >= min_actions) {
+    return mask;
+  }
+
+  std::vector<std::size_t> order(action_count, 0);
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
+    return node.regret_sum[left] > node.regret_sum[right];
+  });
+  for (std::size_t index : order) {
+    if (!mask[index]) {
+      mask[index] = true;
+      selected += 1;
+      if (selected >= min_actions) {
+        break;
+      }
+    }
+  }
+  return mask;
 }
 
 double MccfrTrainer::Traverse(const game::GameState& state,
@@ -149,14 +248,39 @@ double MccfrTrainer::Traverse(const game::GameState& state,
     }
 
     std::vector<double> action_utilities(actions.size(), 0.0);
-    double node_utility = 0.0;
+    const auto active_mask = BuildPrunedActionMask(node, actions.size(), iteration);
+    double active_mass = 0.0;
+    double active_weighted_utility = 0.0;
     for (std::size_t i = 0; i < actions.size(); ++i) {
+      if (!active_mask[i]) {
+        continue;
+      }
       const auto next = state.CloneAndApplyAction(actions[i]);
       action_utilities[i] =
           Traverse(*next, update_player, iteration, reach_opponent_target, reach_sampling);
-      node_utility += strategy[i] * action_utilities[i];
+      active_mass += strategy[i];
+      active_weighted_utility += strategy[i] * action_utilities[i];
+    }
+
+    double fallback_utility = 0.0;
+    if (active_mass > 0.0) {
+      fallback_utility = active_weighted_utility / active_mass;
     }
     for (std::size_t i = 0; i < actions.size(); ++i) {
+      if (!active_mask[i]) {
+        action_utilities[i] = fallback_utility;
+      }
+    }
+
+    double node_utility = 0.0;
+    for (std::size_t i = 0; i < actions.size(); ++i) {
+      node_utility += strategy[i] * action_utilities[i];
+    }
+
+    for (std::size_t i = 0; i < actions.size(); ++i) {
+      if (!active_mask[i]) {
+        continue;
+      }
       const double regret = importance_weight * (action_utilities[i] - node_utility);
       node.regret_sum[i] = std::max(0.0, node.regret_sum[i] + regret);
     }

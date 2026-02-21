@@ -31,6 +31,10 @@ class MccfrTrainer {
                   std::uint64_t iteration,
                   double reach_opponent_target,
                   double reach_sampling);
+  void ApplyLcfrDiscount(std::uint64_t iteration);
+  std::vector<bool> BuildPrunedActionMask(const InfosetNode& node,
+                                          std::size_t action_count,
+                                          std::uint64_t iteration) const;
   std::size_t SampleIndex(const std::vector<double>& probs);
   std::vector<double> BuildSamplingDistribution(const std::vector<double>& strategy) const;
 

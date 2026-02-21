@@ -46,6 +46,9 @@ Select algorithm and deterministic run options:
 ```powershell
 .\build\msvc-debug\Debug\plarbius_train.exe 200000 --algo mccfr --seed 42 `
   --game kuhn --sampling-epsilon 0.3 `
+  --lcfr-discount --lcfr-start 2000 --lcfr-interval 1 `
+  --prune-actions --prune-start 20000 --prune-threshold 0.000001 `
+  --prune-min-actions 2 --prune-full-interval 5000 `
   --checkpoint data\kuhn_mccfr.ckpt.tsv --checkpoint-every 10000 `
   --metrics-out data\kuhn_mccfr_metrics.csv --metrics-interval 10000 `
   --policy-out data\kuhn_mccfr.policy.tsv --no-strategy-print
@@ -87,6 +90,9 @@ for dashboard `mbb/game` + AIVAT-style plots. Control it with:
 - `-HandHistoryHands 20000` (default)
 - `-HandHistoryBaseSeed 1`
 - `-SkipHandHistory` to disable
+- `-MccfrLcfrDiscount -MccfrLcfrStart 2000 -MccfrLcfrInterval 1`
+- `-MccfrPruneActions -MccfrPruneStart 20000 -MccfrPruneThreshold 0.000001`
+- `-MccfrPruneMinActions 2 -MccfrPruneFullTraversalInterval 5000`
 
 Quick profiling run:
 

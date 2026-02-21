@@ -20,6 +20,7 @@ class InfosetTable {
 
   [[nodiscard]] std::size_t Size() const noexcept;
   [[nodiscard]] const std::unordered_map<std::string, InfosetNode>& Nodes() const noexcept;
+  [[nodiscard]] std::unordered_map<std::string, InfosetNode>& MutableNodes() noexcept;
 
  private:
   std::unordered_map<std::string, InfosetNode> nodes_;
