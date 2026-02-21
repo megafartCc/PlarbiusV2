@@ -1,4 +1,4 @@
-const fs = require("fs");
+﻿const fs = require("fs");
 const path = require("path");
 const express = require("express");
 
@@ -8,6 +8,21 @@ const PROJECT_ROOT = path.resolve(__dirname, "..");
 const DEFAULT_EXPERIMENTS_DIR = path.join(PROJECT_ROOT, "experiments");
 const EXPERIMENTS_DIR = path.resolve(process.env.EXPERIMENTS_DIR || DEFAULT_EXPERIMENTS_DIR);
 const PORT = Number(process.env.PORT || 3000);
+const REFRESH_INTERVAL_MS = Math.max(3000, Number(process.env.REFRESH_INTERVAL_MS || 30000));
+const SSE_PING_INTERVAL_MS = 25000;
+
+const runtimeCache = {
+  version: 0,
+  signature: "",
+  refreshed_at_ms: 0,
+  next_refresh_at_ms: 0,
+  runs: [],
+  runs_by_id: new Map()
+};
+
+const handHistoryCache = new Map();
+const sseClients = new Set();
+let refreshInFlight = false;
 
 function assertSafeRunId(runId) {
   if (!/^[a-zA-Z0-9._-]+$/.test(runId)) {
@@ -15,17 +30,51 @@ function assertSafeRunId(runId) {
   }
 }
 
-function getRunDir(runId) {
-  assertSafeRunId(runId);
-  const runDir = path.join(EXPERIMENTS_DIR, runId);
-  if (!fs.existsSync(runDir) || !fs.statSync(runDir).isDirectory()) {
-    throw new Error(`Run not found: ${runId}`);
+function ensureDirExists(dirPath) {
+  return fs.existsSync(dirPath) && fs.statSync(dirPath).isDirectory();
+}
+
+function toNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toIso(valueMs) {
+  if (!Number.isFinite(valueMs) || valueMs <= 0) {
+    return null;
   }
-  return runDir;
+  return new Date(valueMs).toISOString();
+}
+
+function splitCsvLine(line) {
+  const out = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (ch === "," && !inQuotes) {
+      out.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  out.push(current);
+  return out;
 }
 
 function parseCsvFile(filePath) {
-  if (!fs.existsSync(filePath)) {
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
     return [];
   }
   const raw = fs.readFileSync(filePath, "utf8").trim();
@@ -36,13 +85,15 @@ function parseCsvFile(filePath) {
   if (lines.length < 2) {
     return [];
   }
-  const header = lines[0].split(",");
+  const header = splitCsvLine(lines[0]);
   const rows = [];
+
   for (let i = 1; i < lines.length; i += 1) {
-    if (!lines[i]) {
+    const line = lines[i];
+    if (!line) {
       continue;
     }
-    const cells = lines[i].split(",");
+    const cells = splitCsvLine(line);
     const row = {};
     for (let c = 0; c < header.length; c += 1) {
       row[header[c]] = cells[c] !== undefined ? cells[c] : "";
@@ -52,28 +103,24 @@ function parseCsvFile(filePath) {
   return rows;
 }
 
-function countCsvRows(filePath) {
-  if (!fs.existsSync(filePath)) {
-    return 0;
-  }
-  const rows = parseCsvFile(filePath);
-  return rows.length;
-}
-
-function toNumber(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function listRunIds() {
-  if (!fs.existsSync(EXPERIMENTS_DIR)) {
+  if (!ensureDirExists(EXPERIMENTS_DIR)) {
     return [];
   }
   return fs
     .readdirSync(EXPERIMENTS_DIR, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .map((d) => d.name)
+    .filter((dirent) => dirent.isDirectory())
+    .map((dirent) => dirent.name)
     .sort((a, b) => b.localeCompare(a));
+}
+
+function getRunDir(runId) {
+  assertSafeRunId(runId);
+  const runDir = path.join(EXPERIMENTS_DIR, runId);
+  if (!ensureDirExists(runDir)) {
+    throw new Error(`Run not found: ${runId}`);
+  }
+  return runDir;
 }
 
 function resolveArtifactPath(runDir, artifactPath) {
@@ -98,15 +145,13 @@ function resolveArtifactPath(runDir, artifactPath) {
   return null;
 }
 
-function parseSummary(runId) {
-  const runDir = getRunDir(runId);
+function parseSummaryFromDir(runDir) {
   const summaryPath = path.join(runDir, "summary.csv");
   const rows = parseCsvFile(summaryPath).map((row) => {
     const metricsPath = resolveArtifactPath(runDir, row.metrics_path);
     const policyPath = resolveArtifactPath(runDir, row.policy_path);
     const checkpointPath = resolveArtifactPath(runDir, row.checkpoint_path);
     const stdoutPath = resolveArtifactPath(runDir, row.stdout_log);
-
     return {
       algorithm: row.algorithm || "",
       seed: toNumber(row.seed),
@@ -124,13 +169,12 @@ function parseSummary(runId) {
       stdout_file: stdoutPath ? path.basename(stdoutPath) : null
     };
   });
-  return rows;
+  return { summaryPath, rows };
 }
 
-function parseAllMetrics(runId) {
-  const runDir = getRunDir(runId);
+function parseAllMetricsFromDir(runDir) {
   const metricsPath = path.join(runDir, "all_metrics.csv");
-  return parseCsvFile(metricsPath).map((row) => ({
+  const rows = parseCsvFile(metricsPath).map((row) => ({
     algorithm: row.algorithm || "",
     seed: toNumber(row.seed),
     iteration: toNumber(row.iteration),
@@ -144,6 +188,7 @@ function parseAllMetrics(runId) {
     metrics_path: resolveArtifactPath(runDir, row.metrics_path),
     metrics_file: row.metrics_path ? path.basename(row.metrics_path) : null
   }));
+  return { metricsPath, rows };
 }
 
 function aggregateLearning(metricsRows) {
@@ -169,10 +214,10 @@ function aggregateLearning(metricsRows) {
       .sort((a, b) => a[0] - b[0])
       .map(([iteration, values]) => {
         const count = values.length;
-        const mean = values.reduce((acc, v) => acc + v, 0) / count;
+        const mean = values.reduce((acc, x) => acc + x, 0) / count;
         const variance =
           count > 1
-            ? values.reduce((acc, v) => acc + (v - mean) * (v - mean), 0) / (count - 1)
+            ? values.reduce((acc, x) => acc + (x - mean) * (x - mean), 0) / (count - 1)
             : 0;
         const stddev = Math.sqrt(variance);
         const stderr = count > 0 ? stddev / Math.sqrt(count) : 0;
@@ -217,6 +262,446 @@ function aggregateLearning(metricsRows) {
   }));
 
   return { byAlgorithm, bySeed };
+}
+
+function walkDir(dirPath, maxDepth = 3, currentDepth = 0) {
+  if (!ensureDirExists(dirPath) || currentDepth > maxDepth) {
+    return [];
+  }
+  const out = [];
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...walkDir(fullPath, maxDepth, currentDepth + 1));
+    } else if (entry.isFile()) {
+      out.push(fullPath);
+    }
+  }
+  return out;
+}
+
+function listPolicyFilesFromDir(runDir, summaryRows) {
+  const fromDisk = walkDir(runDir, 2)
+    .filter((f) => f.toLowerCase().endsWith(".policy.tsv"))
+    .map((f) => path.basename(f));
+  const fromSummary = summaryRows.map((row) => row.policy_file).filter((x) => Boolean(x));
+  return Array.from(new Set([...fromDisk, ...fromSummary])).sort();
+}
+
+function toRelativeFromRun(runDir, absolutePath) {
+  const rel = path.relative(runDir, absolutePath);
+  return rel.split(path.sep).join("/");
+}
+
+function listHandHistoryFilesFromDir(runDir) {
+  const candidates = walkDir(runDir, 3);
+  const out = [];
+  for (const filePath of candidates) {
+    const name = path.basename(filePath).toLowerCase();
+    const ext = path.extname(filePath).toLowerCase();
+    if (!(ext === ".jsonl" || ext === ".csv")) {
+      continue;
+    }
+    if (name === "summary.csv" || name === "all_metrics.csv" || name.endsWith(".metrics.csv")) {
+      continue;
+    }
+    const looksLikeHistory = name.includes("hand") || name.includes("history") || name.includes("match");
+    if (!looksLikeHistory) {
+      continue;
+    }
+    const stat = fs.statSync(filePath);
+    out.push({
+      file: path.basename(filePath),
+      relative_path: toRelativeFromRun(runDir, filePath),
+      absolute_path: path.resolve(filePath),
+      size_bytes: stat.size,
+      updated_at: stat.mtime.toISOString()
+    });
+  }
+  out.sort((a, b) => a.relative_path.localeCompare(b.relative_path));
+  return out;
+}
+
+function computeRunSignaturePart(runRecord) {
+  return {
+    id: runRecord.id,
+    updated_at: runRecord.updated_at,
+    summary_rows: runRecord.summary_rows,
+    metrics_rows: runRecord.metrics_rows,
+    policies: runRecord.policies,
+    hand_histories: runRecord.hand_histories.map((h) => ({
+      relative_path: h.relative_path,
+      updated_at: h.updated_at,
+      size_bytes: h.size_bytes
+    }))
+  };
+}
+
+function buildRunRecord(runId) {
+  const runDir = getRunDir(runId);
+  const runStat = fs.statSync(runDir);
+  const { summaryPath, rows: summaryRows } = parseSummaryFromDir(runDir);
+  const { metricsPath, rows: metricsRows } = parseAllMetricsFromDir(runDir);
+  const policies = listPolicyFilesFromDir(runDir, summaryRows);
+  const handHistories = listHandHistoryFilesFromDir(runDir);
+
+  return {
+    id: runId,
+    run_dir: runDir,
+    updated_at: runStat.mtime.toISOString(),
+    summary_path: summaryPath,
+    metrics_path: metricsPath,
+    summary_rows: summaryRows.length,
+    metrics_rows: metricsRows.length,
+    summary_rows_data: summaryRows,
+    metrics_rows_data: metricsRows,
+    policies,
+    hand_histories: handHistories
+  };
+}
+
+function broadcastRefreshEvent(payload) {
+  const data = `event: refresh\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const res of sseClients) {
+    res.write(data);
+  }
+}
+
+function refreshRunsCache(reason = "manual") {
+  if (refreshInFlight) {
+    return { changed: false, version: runtimeCache.version, reason: "in_flight" };
+  }
+  refreshInFlight = true;
+  try {
+    const runIds = listRunIds();
+    const runs = [];
+    const runsById = new Map();
+
+    for (const runId of runIds) {
+      try {
+        const record = buildRunRecord(runId);
+        runs.push(record);
+        runsById.set(runId, record);
+      } catch (error) {
+        runs.push({
+          id: runId,
+          error: error.message,
+          summary_rows: 0,
+          metrics_rows: 0,
+          policies: [],
+          hand_histories: [],
+          updated_at: null
+        });
+      }
+    }
+
+    const signature = JSON.stringify(runs.map(computeRunSignaturePart));
+    const changed = signature !== runtimeCache.signature;
+    if (changed) {
+      runtimeCache.version += 1;
+      runtimeCache.signature = signature;
+      runtimeCache.runs = runs;
+      runtimeCache.runs_by_id = runsById;
+      runtimeCache.refreshed_at_ms = Date.now();
+      runtimeCache.next_refresh_at_ms = runtimeCache.refreshed_at_ms + REFRESH_INTERVAL_MS;
+      broadcastRefreshEvent({
+        version: runtimeCache.version,
+        reason,
+        refreshed_at: toIso(runtimeCache.refreshed_at_ms),
+        runs_count: runtimeCache.runs.length
+      });
+    } else {
+      runtimeCache.refreshed_at_ms = Date.now();
+      runtimeCache.next_refresh_at_ms = runtimeCache.refreshed_at_ms + REFRESH_INTERVAL_MS;
+    }
+
+    return { changed, version: runtimeCache.version, reason };
+  } finally {
+    refreshInFlight = false;
+  }
+}
+
+function ensureCacheReady() {
+  if (runtimeCache.refreshed_at_ms === 0) {
+    refreshRunsCache("on_demand");
+  }
+}
+
+function getRunRecord(runId) {
+  ensureCacheReady();
+  const record = runtimeCache.runs_by_id.get(runId);
+  if (!record) {
+    throw new Error(`Run not found: ${runId}`);
+  }
+  if (record.error) {
+    throw new Error(record.error);
+  }
+  return record;
+}
+
+function getPathField(obj, keys) {
+  for (const key of keys) {
+    if (obj[key] !== undefined && obj[key] !== null && String(obj[key]).trim() !== "") {
+      return obj[key];
+    }
+  }
+  return null;
+}
+
+function normalizeHandRow(raw, fallbackHandNumber) {
+  const handId =
+    toNumber(getPathField(raw, ["hand_id", "hand", "id", "hand_number", "handIndex"])) ||
+    fallbackHandNumber;
+
+  const bbRaw = toNumber(getPathField(raw, ["big_blind", "bb", "blind", "bigBlind", "big_blind_amount"]));
+  const bigBlind = bbRaw && bbRaw > 0 ? bbRaw : 1;
+
+  let deltaBb = toNumber(
+    getPathField(raw, [
+      "delta_p0_bb",
+      "p0_delta_bb",
+      "player0_delta_bb",
+      "utility_p0_bb",
+      "result_p0_bb",
+      "profit_p0_bb",
+      "p0_bb"
+    ])
+  );
+
+  if (deltaBb === null) {
+    const p1Delta = toNumber(
+      getPathField(raw, [
+        "delta_p1_bb",
+        "p1_delta_bb",
+        "player1_delta_bb",
+        "utility_p1_bb",
+        "result_p1_bb",
+        "profit_p1_bb",
+        "p1_bb"
+      ])
+    );
+    if (p1Delta !== null) {
+      deltaBb = -p1Delta;
+    }
+  }
+
+  if (deltaBb === null) {
+    const chips = toNumber(
+      getPathField(raw, [
+        "delta_p0_chips",
+        "player0_delta_chips",
+        "utility_p0_chips",
+        "result_p0_chips",
+        "p0_chips"
+      ])
+    );
+    if (chips !== null) {
+      deltaBb = chips / bigBlind;
+    }
+  }
+
+  if (deltaBb === null) {
+    return null;
+  }
+
+  const contextParts = [];
+  for (const key of [
+    "street",
+    "round",
+    "position",
+    "seat",
+    "pot_bucket",
+    "board_bucket",
+    "action_bucket",
+    "state_key",
+    "public_state"
+  ]) {
+    if (raw[key] !== undefined && raw[key] !== null && String(raw[key]).trim() !== "") {
+      contextParts.push(`${key}:${String(raw[key]).trim()}`);
+    }
+  }
+
+  return {
+    hand: handId,
+    delta_p0_bb: deltaBb,
+    context_key: contextParts.length > 0 ? contextParts.join("|") : "global",
+    timestamp: getPathField(raw, ["timestamp", "ts", "time", "played_at"])
+  };
+}
+
+function parseJsonlHandHistory(filePath) {
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  const records = [];
+  let handCounter = 1;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    let obj;
+    try {
+      obj = JSON.parse(trimmed);
+    } catch (_error) {
+      continue;
+    }
+    const record = normalizeHandRow(obj, handCounter);
+    if (!record) {
+      continue;
+    }
+    records.push(record);
+    handCounter += 1;
+  }
+  return records;
+}
+
+function parseCsvHandHistory(filePath) {
+  const rows = parseCsvFile(filePath);
+  const records = [];
+  let handCounter = 1;
+  for (const row of rows) {
+    const record = normalizeHandRow(row, handCounter);
+    if (!record) {
+      continue;
+    }
+    records.push(record);
+    handCounter += 1;
+  }
+  return records;
+}
+
+function loadHandHistory(filePath) {
+  const resolved = path.resolve(filePath);
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+    throw new Error(`Hand history file not found: ${filePath}`);
+  }
+  const stat = fs.statSync(resolved);
+  const cached = handHistoryCache.get(resolved);
+  if (cached && cached.mtime_ms === stat.mtimeMs) {
+    return cached.records;
+  }
+
+  let records = [];
+  const ext = path.extname(resolved).toLowerCase();
+  if (ext === ".jsonl") {
+    records = parseJsonlHandHistory(resolved);
+  } else if (ext === ".csv") {
+    records = parseCsvHandHistory(resolved);
+  } else {
+    throw new Error(`Unsupported hand history format: ${ext}`);
+  }
+
+  if (records.length === 0) {
+    throw new Error("No usable hand rows found in this hand history file.");
+  }
+
+  records.sort((a, b) => a.hand - b.hand);
+  handHistoryCache.set(resolved, { mtime_ms: stat.mtimeMs, records });
+  return records;
+}
+
+function computeAivatLikeSeries(values, contextKeys) {
+  const n = values.length;
+  if (contextKeys.length !== n) {
+    throw new Error("AIVAT-like: values/context size mismatch.");
+  }
+  const globalSum = values.reduce((acc, x) => acc + x, 0);
+  const groupStats = new Map();
+
+  for (let i = 0; i < n; i += 1) {
+    const key = contextKeys[i];
+    if (!groupStats.has(key)) {
+      groupStats.set(key, { sum: 0, count: 0 });
+    }
+    const stats = groupStats.get(key);
+    stats.sum += values[i];
+    stats.count += 1;
+  }
+
+  const adjusted = new Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const key = contextKeys[i];
+    const x = values[i];
+    const stats = groupStats.get(key);
+    const globalExcluding = n > 1 ? (globalSum - x) / (n - 1) : globalSum;
+    let groupExcluding = globalExcluding;
+    if (stats && stats.count > 1) {
+      groupExcluding = (stats.sum - x) / (stats.count - 1);
+    }
+    const controlVariate = groupExcluding - globalExcluding;
+    adjusted[i] = x - controlVariate;
+  }
+  return adjusted;
+}
+
+function computeRunningCurve(values, maxPoints = 400) {
+  const n = values.length;
+  if (n === 0) {
+    return {
+      hands: 0,
+      final_mean_bb_per_hand: 0,
+      final_mean_mbb_per_game: 0,
+      final_ci95_mbb_per_game: 0,
+      points: []
+    };
+  }
+
+  const stride = Math.max(1, Math.floor(n / Math.max(20, maxPoints)));
+  let sum = 0;
+  let sumSq = 0;
+  const points = [];
+
+  for (let i = 0; i < n; i += 1) {
+    const x = values[i];
+    sum += x;
+    sumSq += x * x;
+    const hand = i + 1;
+
+    if (hand === 1 || hand === n || hand % stride === 0) {
+      const mean = sum / hand;
+      const variance = hand > 1 ? (sumSq - (sum * sum) / hand) / (hand - 1) : 0;
+      const stderr = Math.sqrt(Math.max(0, variance) / hand);
+      const ci95 = 1.96 * stderr;
+      points.push({
+        hand,
+        mean_bb_per_hand: mean,
+        ci95_bb_per_hand: ci95,
+        mean_mbb_per_game: mean * 1000,
+        ci95_mbb_per_game: ci95 * 1000,
+        ci95_lower_mbb_per_game: (mean - ci95) * 1000,
+        ci95_upper_mbb_per_game: (mean + ci95) * 1000
+      });
+    }
+  }
+
+  const finalPoint = points[points.length - 1];
+  return {
+    hands: n,
+    final_mean_bb_per_hand: finalPoint.mean_bb_per_hand,
+    final_mean_mbb_per_game: finalPoint.mean_mbb_per_game,
+    final_ci95_mbb_per_game: finalPoint.ci95_mbb_per_game,
+    points
+  };
+}
+
+function resolveHistoryFileForRun(runRecord, requestedFile) {
+  const files = runRecord.hand_histories;
+  if (!files || files.length === 0) {
+    throw new Error("No hand-history files found for this run.");
+  }
+  if (!requestedFile) {
+    return files[0];
+  }
+  const normalized = requestedFile.replaceAll("\\", "/");
+  const byName = files.find((f) => f.file === requestedFile);
+  if (byName) {
+    return byName;
+  }
+  const byRelative = files.find((f) => f.relative_path === normalized);
+  if (byRelative) {
+    return byRelative;
+  }
+  throw new Error(`Hand-history file not found in run: ${requestedFile}`);
 }
 
 function readPolicyFile(policyPath) {
@@ -312,7 +797,7 @@ function simulateKuhnHand(policyA, policyB, rng) {
 
     if (history === "" || history === "c") {
       const dist = getDist(policy, infosetKey, 2);
-      const action = sampleIndex(dist, rng); // 0 check, 1 bet
+      const action = sampleIndex(dist, rng);
       if (action === 0) {
         if (history === "") {
           history = "c";
@@ -336,7 +821,7 @@ function simulateKuhnHand(policyA, policyB, rng) {
 
     if (history === "b" || history === "cb") {
       const dist = getDist(policy, infosetKey, 2);
-      const action = sampleIndex(dist, rng); // 0 call, 1 fold
+      const action = sampleIndex(dist, rng);
       if (action === 0) {
         contributions[currentPlayer] += 1;
         history = history === "b" ? "bc" : "cbc";
@@ -403,18 +888,42 @@ function simulateKuhnMatch(policyA, policyB, hands, seed) {
   };
 }
 
-function listPolicyFiles(runId) {
-  const runDir = getRunDir(runId);
-  const fromDir = fs
-    .readdirSync(runDir)
-    .filter((name) => name.endsWith(".policy.tsv"))
-    .sort();
+function listPoliciesForRun(runId) {
+  const record = getRunRecord(runId);
+  return record.policies;
+}
 
-  const fromSummary = parseSummary(runId)
-    .map((row) => row.policy_file)
-    .filter((x) => Boolean(x));
+function getRefreshStatus() {
+  ensureCacheReady();
+  const now = Date.now();
+  const nextInMs = runtimeCache.next_refresh_at_ms > now ? runtimeCache.next_refresh_at_ms - now : 0;
+  return {
+    version: runtimeCache.version,
+    refreshed_at: toIso(runtimeCache.refreshed_at_ms),
+    next_refresh_at: toIso(runtimeCache.next_refresh_at_ms),
+    next_refresh_in_ms: nextInMs,
+    refresh_interval_ms: REFRESH_INTERVAL_MS,
+    runs_count: runtimeCache.runs.length
+  };
+}
 
-  return Array.from(new Set([...fromDir, ...fromSummary])).sort();
+function startScheduledRefresh() {
+  refreshRunsCache("startup");
+  const timer = setInterval(() => {
+    refreshRunsCache("scheduled");
+  }, REFRESH_INTERVAL_MS);
+  timer.unref();
+
+  const ssePing = setInterval(() => {
+    const payload = `event: ping\ndata: ${JSON.stringify({
+      at: new Date().toISOString(),
+      version: runtimeCache.version
+    })}\n\n`;
+    for (const res of sseClients) {
+      res.write(payload);
+    }
+  }, SSE_PING_INTERVAL_MS);
+  ssePing.unref();
 }
 
 app.use(express.static(path.join(__dirname, "public")));
@@ -423,30 +932,76 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     project_root: PROJECT_ROOT,
-    experiments_dir: EXPERIMENTS_DIR
+    experiments_dir: EXPERIMENTS_DIR,
+    refresh_interval_ms: REFRESH_INTERVAL_MS
+  });
+});
+
+app.get("/api/refresh-status", (_req, res) => {
+  try {
+    res.json(getRefreshStatus());
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/refresh-now", (_req, res) => {
+  try {
+    const refresh = refreshRunsCache("manual");
+    res.json({
+      refresh,
+      status: getRefreshStatus()
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/refresh-stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  if (typeof res.flushHeaders === "function") {
+    res.flushHeaders();
+  }
+
+  const hello = {
+    type: "hello",
+    status: getRefreshStatus()
+  };
+  res.write(`event: hello\ndata: ${JSON.stringify(hello)}\n\n`);
+  sseClients.add(res);
+
+  req.on("close", () => {
+    sseClients.delete(res);
   });
 });
 
 app.get("/api/runs", (_req, res) => {
-  const runIds = listRunIds();
-  const runs = runIds.map((id) => {
-    const runDir = path.join(EXPERIMENTS_DIR, id);
-    const summaryPath = path.join(runDir, "summary.csv");
-    const metricsPath = path.join(runDir, "all_metrics.csv");
-    return {
-      id,
-      summary_rows: countCsvRows(summaryPath),
-      metrics_rows: countCsvRows(metricsPath),
-      updated_at: fs.statSync(runDir).mtime.toISOString()
-    };
-  });
-  res.json({ runs });
+  try {
+    ensureCacheReady();
+    const runs = runtimeCache.runs.map((run) => ({
+      id: run.id,
+      summary_rows: run.summary_rows || 0,
+      metrics_rows: run.metrics_rows || 0,
+      policy_count: run.policies ? run.policies.length : 0,
+      hand_history_count: run.hand_histories ? run.hand_histories.length : 0,
+      updated_at: run.updated_at,
+      error: run.error || null
+    }));
+    res.json({ runs, refresh: getRefreshStatus() });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.get("/api/runs/:runId/summary", (req, res) => {
   try {
-    const rows = parseSummary(req.params.runId);
-    res.json({ run_id: req.params.runId, rows });
+    const run = getRunRecord(req.params.runId);
+    res.json({
+      run_id: run.id,
+      rows: run.summary_rows_data
+    });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -454,8 +1009,11 @@ app.get("/api/runs/:runId/summary", (req, res) => {
 
 app.get("/api/runs/:runId/metrics", (req, res) => {
   try {
-    const rows = parseAllMetrics(req.params.runId);
-    res.json({ run_id: req.params.runId, rows });
+    const run = getRunRecord(req.params.runId);
+    res.json({
+      run_id: run.id,
+      rows: run.metrics_rows_data
+    });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -463,10 +1021,10 @@ app.get("/api/runs/:runId/metrics", (req, res) => {
 
 app.get("/api/runs/:runId/learning", (req, res) => {
   try {
-    const rows = parseAllMetrics(req.params.runId);
-    const learning = aggregateLearning(rows);
+    const run = getRunRecord(req.params.runId);
+    const learning = aggregateLearning(run.metrics_rows_data);
     res.json({
-      run_id: req.params.runId,
+      run_id: run.id,
       by_algorithm: learning.byAlgorithm,
       by_seed: learning.bySeed
     });
@@ -477,8 +1035,63 @@ app.get("/api/runs/:runId/learning", (req, res) => {
 
 app.get("/api/runs/:runId/policies", (req, res) => {
   try {
-    const policyFiles = listPolicyFiles(req.params.runId);
-    res.json({ run_id: req.params.runId, policies: policyFiles });
+    const policies = listPoliciesForRun(req.params.runId);
+    res.json({
+      run_id: req.params.runId,
+      policies
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/runs/:runId/hand-histories", (req, res) => {
+  try {
+    const run = getRunRecord(req.params.runId);
+    res.json({
+      run_id: run.id,
+      files: run.hand_histories
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/runs/:runId/mbb", (req, res) => {
+  try {
+    const run = getRunRecord(req.params.runId);
+    const method = String(req.query.method || "both").toLowerCase();
+    const requestedFile = req.query.handHistory || req.query.file || req.query.history;
+    const maxPoints = Math.max(20, Math.min(2000, Number(req.query.maxPoints || 500)));
+    const historyFile = resolveHistoryFileForRun(run, requestedFile);
+    const records = loadHandHistory(historyFile.absolute_path);
+
+    const rawValues = records.map((r) => r.delta_p0_bb);
+    const contextKeys = records.map((r) => r.context_key || "global");
+    const contextCount = new Set(contextKeys).size;
+
+    const response = {
+      run_id: run.id,
+      hand_history_file: historyFile.file,
+      hand_history_relative_path: historyFile.relative_path,
+      method,
+      hands_count: records.length,
+      context_keys_count: contextCount,
+      notes: "AIVAT-style uses leave-one-out context control variates from hand-history contexts."
+    };
+
+    if (method === "raw" || method === "both") {
+      response.raw = computeRunningCurve(rawValues, maxPoints);
+    }
+    if (method === "aivat_like" || method === "both") {
+      const adjusted = computeAivatLikeSeries(rawValues, contextKeys);
+      response.aivat_like = computeRunningCurve(adjusted, maxPoints);
+    }
+    if (!response.raw && !response.aivat_like) {
+      throw new Error("Invalid method. Use raw, aivat_like, or both.");
+    }
+
+    res.json(response);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -486,7 +1099,7 @@ app.get("/api/runs/:runId/policies", (req, res) => {
 
 app.get("/api/runs/:runId/match", (req, res) => {
   try {
-    const runDir = getRunDir(req.params.runId);
+    const run = getRunRecord(req.params.runId);
     const policyAName = req.query.policyA;
     const policyBName = req.query.policyB || policyAName;
     const hands = Math.max(10, Math.min(500000, Number(req.query.hands || 10000)));
@@ -500,8 +1113,8 @@ app.get("/api/runs/:runId/match", (req, res) => {
       throw new Error("Match simulation currently supports only game=kuhn.");
     }
 
-    const policyAPath = resolveArtifactPath(runDir, policyAName);
-    const policyBPath = resolveArtifactPath(runDir, policyBName);
+    const policyAPath = resolveArtifactPath(run.run_dir, policyAName);
+    const policyBPath = resolveArtifactPath(run.run_dir, policyBName);
     if (!policyAPath) {
       throw new Error(`Policy file not found: ${policyAName}`);
     }
@@ -513,7 +1126,7 @@ app.get("/api/runs/:runId/match", (req, res) => {
     const policyB = readPolicyFile(policyBPath);
     const report = simulateKuhnMatch(policyA, policyB, hands, seed);
     res.json({
-      run_id: req.params.runId,
+      run_id: run.id,
       game,
       policy_a: path.basename(policyAPath),
       policy_b: path.basename(policyBPath),
@@ -528,8 +1141,10 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
+startScheduledRefresh();
+
 app.listen(PORT, () => {
   console.log(`Plarbius dashboard listening on port ${PORT}`);
   console.log(`Experiments dir: ${EXPERIMENTS_DIR}`);
+  console.log(`Refresh interval: ${REFRESH_INTERVAL_MS} ms`);
 });
-

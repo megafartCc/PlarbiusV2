@@ -11,7 +11,7 @@
   <main class="layout">
     <header class="hero">
       <h1>PlarbiusV2 Training Dashboard</h1>
-      <p>Learning curves, exploitability tracking, and Pluribus-style running performance on sampled Kuhn hands.</p>
+      <p>Learning curves, exploitability tracking, and hand-history performance in mbb/game with AIVAT-style variance reduction.</p>
     </header>
 
     <section class="panel controls">
@@ -22,6 +22,7 @@
         <button id="loadRunBtn" type="button">Load Run</button>
       </div>
       <div class="row muted" id="statusLine">Loading runs...</div>
+      <div class="row muted" id="refreshMetaLine">Refresh status: pending...</div>
     </section>
 
     <section class="panel">
@@ -50,7 +51,7 @@
     </section>
 
     <section class="panel">
-      <h2>Learning Curve (Mean ± 95% CI)</h2>
+      <h2>Learning Curve (Mean +/- 95% CI)</h2>
       <canvas id="meanLearningChart" height="120"></canvas>
     </section>
 
@@ -77,9 +78,29 @@
       <div id="matchStats" class="muted"></div>
       <canvas id="matchChart" height="130"></canvas>
     </section>
+
+    <section class="panel">
+      <h2>Hand History Performance (mbb/game)</h2>
+      <div class="row">
+        <label for="handHistorySelect">Hand History</label>
+        <select id="handHistorySelect"></select>
+      </div>
+      <div class="row">
+        <label for="handMethodSelect">Method</label>
+        <select id="handMethodSelect">
+          <option value="both">Raw + AIVAT-like</option>
+          <option value="raw">Raw only</option>
+          <option value="aivat_like">AIVAT-like only</option>
+        </select>
+        <label for="handMaxPointsInput">Max Points</label>
+        <input id="handMaxPointsInput" type="number" min="20" max="2000" step="20" value="500">
+        <button id="loadHandChartBtn" type="button">Load Hand Chart</button>
+      </div>
+      <div id="handChartStats" class="muted"></div>
+      <canvas id="handHistoryChart" height="130"></canvas>
+    </section>
   </main>
 
   <script src="/app.js"></script>
 </body>
 </html>
-

@@ -2,6 +2,7 @@ const runSelect = document.getElementById("runSelect");
 const refreshRunsBtn = document.getElementById("refreshRunsBtn");
 const loadRunBtn = document.getElementById("loadRunBtn");
 const statusLine = document.getElementById("statusLine");
+const refreshMetaLine = document.getElementById("refreshMetaLine");
 
 const summaryStats = document.getElementById("summaryStats");
 const summaryTbody = document.querySelector("#summaryTable tbody");
@@ -13,19 +14,32 @@ const seedInput = document.getElementById("seedInput");
 const runMatchBtn = document.getElementById("runMatchBtn");
 const matchStats = document.getElementById("matchStats");
 
+const handHistorySelect = document.getElementById("handHistorySelect");
+const handMethodSelect = document.getElementById("handMethodSelect");
+const handMaxPointsInput = document.getElementById("handMaxPointsInput");
+const loadHandChartBtn = document.getElementById("loadHandChartBtn");
+const handChartStats = document.getElementById("handChartStats");
+
 const state = {
   runId: null,
   runs: [],
   summaryRows: [],
   learning: { by_algorithm: [], by_seed: [] },
-  policies: []
+  policies: [],
+  handHistories: [],
+  refresh: null,
+  refreshStream: null,
+  loadingRunsPromise: null,
+  loadingRunPromise: null,
+  lastRefreshVersionHandled: 0
 };
 
 const charts = {
   seedLearning: null,
   meanLearning: null,
   finalExploitability: null,
-  match: null
+  match: null,
+  handHistory: null
 };
 
 function setStatus(message, isError = false) {
@@ -60,16 +74,76 @@ function fmt(value, digits = 6) {
   return Number(value).toFixed(digits);
 }
 
-function clearCharts() {
-  for (const chart of Object.values(charts)) {
-    if (chart) {
-      chart.destroy();
-    }
+function fmtInt(value) {
+  if (!Number.isFinite(Number(value))) {
+    return "-";
   }
-  charts.seedLearning = null;
-  charts.meanLearning = null;
-  charts.finalExploitability = null;
-  charts.match = null;
+  return Math.round(Number(value)).toLocaleString();
+}
+
+function fmtTimestamp(value) {
+  if (!value) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toLocaleString();
+}
+
+function fmtDurationMs(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0s";
+  }
+  const totalSeconds = Math.floor(value / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) {
+    return `${seconds}s`;
+  }
+  return `${minutes}m ${seconds}s`;
+}
+
+function destroyChart(chartKey) {
+  if (charts[chartKey]) {
+    charts[chartKey].destroy();
+    charts[chartKey] = null;
+  }
+}
+
+function clearCharts() {
+  destroyChart("seedLearning");
+  destroyChart("meanLearning");
+  destroyChart("finalExploitability");
+  destroyChart("match");
+  destroyChart("handHistory");
+}
+
+function setRefreshState(refresh) {
+  if (!refresh) {
+    return;
+  }
+  state.refresh = refresh;
+  if (Number.isFinite(Number(refresh.version))) {
+    state.lastRefreshVersionHandled = Math.max(state.lastRefreshVersionHandled, Number(refresh.version));
+  }
+  renderRefreshMeta();
+}
+
+function renderRefreshMeta() {
+  if (!state.refresh) {
+    refreshMetaLine.textContent = "Refresh status: unavailable";
+    return;
+  }
+  const refresh = state.refresh;
+  const nextIn = refresh.next_refresh_at
+    ? Math.max(0, new Date(refresh.next_refresh_at).getTime() - Date.now())
+    : refresh.next_refresh_in_ms;
+  refreshMetaLine.textContent =
+    `Refresh v${refresh.version} | last ${fmtTimestamp(refresh.refreshed_at)} | ` +
+    `next in ${fmtDurationMs(nextIn)} | interval ${fmtDurationMs(refresh.refresh_interval_ms)} | runs ${fmtInt(refresh.runs_count)}`;
 }
 
 function renderRunOptions() {
@@ -77,7 +151,8 @@ function renderRunOptions() {
   state.runs.forEach((run) => {
     const option = document.createElement("option");
     option.value = run.id;
-    option.textContent = `${run.id} (summary:${run.summary_rows}, metrics:${run.metrics_rows})`;
+    const errorSuffix = run.error ? " [error]" : "";
+    option.textContent = `${run.id}${errorSuffix} (summary:${run.summary_rows}, metrics:${run.metrics_rows}, hh:${run.hand_history_count})`;
     runSelect.appendChild(option);
   });
 }
@@ -159,15 +234,9 @@ function renderLearningCharts() {
   const meanCtx = document.getElementById("meanLearningChart");
   const finalCtx = document.getElementById("finalExploitabilityChart");
 
-  if (charts.seedLearning) {
-    charts.seedLearning.destroy();
-  }
-  if (charts.meanLearning) {
-    charts.meanLearning.destroy();
-  }
-  if (charts.finalExploitability) {
-    charts.finalExploitability.destroy();
-  }
+  destroyChart("seedLearning");
+  destroyChart("meanLearning");
+  destroyChart("finalExploitability");
 
   const seedDatasets = state.learning.by_seed.map((series) => ({
     label: `${series.algorithm} seed ${series.seed}`,
@@ -185,8 +254,7 @@ function renderLearningCharts() {
     options: {
       responsive: true,
       plugins: {
-        legend: { display: true, position: "bottom" },
-        title: { display: false }
+        legend: { display: true, position: "bottom" }
       },
       scales: {
         x: { type: "linear", title: { display: true, text: "Iteration" } },
@@ -209,7 +277,7 @@ function renderLearningCharts() {
       borderWidth: 0
     });
     meanDatasets.push({
-      label: `${series.algorithm} CI`,
+      label: `${series.algorithm} CI band`,
       data: lower,
       borderColor: algoColor(series.algorithm, 0),
       backgroundColor: algoColor(series.algorithm, 0.16),
@@ -237,7 +305,7 @@ function renderLearningCharts() {
         legend: {
           position: "bottom",
           labels: {
-            filter: (item) => !item.text.includes("CI upper") && !item.text.endsWith(" CI")
+            filter: (item) => !item.text.includes("CI upper") && !item.text.includes("CI band")
           }
         }
       },
@@ -283,7 +351,123 @@ function renderPolicyOptions() {
   if (state.policies.length >= 2) {
     policyASelect.selectedIndex = 0;
     policyBSelect.selectedIndex = 1;
+  } else if (state.policies.length === 1) {
+    policyASelect.selectedIndex = 0;
+    policyBSelect.selectedIndex = 0;
   }
+}
+
+function renderHandHistoryOptions(previousSelection = null) {
+  handHistorySelect.innerHTML = "";
+  if (state.handHistories.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No hand-history files found";
+    handHistorySelect.appendChild(option);
+    handHistorySelect.disabled = true;
+    loadHandChartBtn.disabled = true;
+    handChartStats.textContent = "No hand-history files found for this run.";
+    destroyChart("handHistory");
+    return;
+  }
+
+  for (const file of state.handHistories) {
+    const option = document.createElement("option");
+    option.value = file.relative_path;
+    option.textContent = `${file.relative_path} (${fmtInt(file.size_bytes)} bytes)`;
+    handHistorySelect.appendChild(option);
+  }
+
+  handHistorySelect.disabled = false;
+  loadHandChartBtn.disabled = false;
+
+  if (previousSelection && state.handHistories.some((f) => f.relative_path === previousSelection)) {
+    handHistorySelect.value = previousSelection;
+  } else {
+    handHistorySelect.selectedIndex = 0;
+  }
+}
+
+function buildMbbDatasets(curve, labelPrefix, colorLine, colorFill) {
+  const upper = curve.points.map((p) => ({ x: p.hand, y: p.ci95_upper_mbb_per_game }));
+  const lower = curve.points.map((p) => ({ x: p.hand, y: p.ci95_lower_mbb_per_game }));
+  const mean = curve.points.map((p) => ({ x: p.hand, y: p.mean_mbb_per_game }));
+
+  return [
+    {
+      label: `${labelPrefix} CI upper`,
+      data: upper,
+      borderColor: "rgba(0,0,0,0)",
+      pointRadius: 0,
+      borderWidth: 0
+    },
+    {
+      label: `${labelPrefix} CI band`,
+      data: lower,
+      borderColor: "rgba(0,0,0,0)",
+      backgroundColor: colorFill,
+      pointRadius: 0,
+      borderWidth: 0,
+      fill: "-1"
+    },
+    {
+      label: `${labelPrefix} mean`,
+      data: mean,
+      borderColor: colorLine,
+      backgroundColor: colorLine,
+      borderWidth: 2,
+      tension: 0.1,
+      pointRadius: 1
+    }
+  ];
+}
+
+function renderHandHistoryChart(result) {
+  const datasets = [];
+
+  if (result.raw && Array.isArray(result.raw.points) && result.raw.points.length > 0) {
+    datasets.push(...buildMbbDatasets(result.raw, "Raw", "rgba(234, 88, 12, 1)", "rgba(234, 88, 12, 0.14)"));
+  }
+  if (result.aivat_like && Array.isArray(result.aivat_like.points) && result.aivat_like.points.length > 0) {
+    datasets.push(...buildMbbDatasets(result.aivat_like, "AIVAT-like", "rgba(21, 128, 61, 1)", "rgba(21, 128, 61, 0.15)"));
+  }
+
+  destroyChart("handHistory");
+
+  charts.handHistory = new Chart(document.getElementById("handHistoryChart"), {
+    type: "line",
+    data: { datasets },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: {
+            filter: (item) => !item.text.includes("CI upper") && !item.text.includes("CI band")
+          }
+        }
+      },
+      scales: {
+        x: { type: "linear", title: { display: true, text: "Hands Played" } },
+        y: { title: { display: true, text: "Running mean (mbb/game, P0)" } }
+      }
+    }
+  });
+
+  const parts = [
+    `${result.hand_history_relative_path}`,
+    `hands=${fmtInt(result.hands_count)}`,
+    `contexts=${fmtInt(result.context_keys_count)}`
+  ];
+
+  if (result.raw) {
+    parts.push(`raw=${fmt(result.raw.final_mean_mbb_per_game, 3)} +/- ${fmt(result.raw.final_ci95_mbb_per_game, 3)} mbb/game`);
+  }
+  if (result.aivat_like) {
+    parts.push(`aivat-like=${fmt(result.aivat_like.final_mean_mbb_per_game, 3)} +/- ${fmt(result.aivat_like.final_ci95_mbb_per_game, 3)} mbb/game`);
+  }
+
+  handChartStats.textContent = parts.join(" | ");
 }
 
 async function runMatch() {
@@ -304,9 +488,7 @@ async function runMatch() {
   const lower = points.map((p) => ({ x: p.hand, y: p.ci_lower }));
   const mean = points.map((p) => ({ x: p.hand, y: p.mean }));
 
-  if (charts.match) {
-    charts.match.destroy();
-  }
+  destroyChart("match");
 
   charts.match = new Chart(document.getElementById("matchChart"), {
     type: "line",
@@ -361,60 +543,241 @@ async function runMatch() {
   setStatus(`Loaded run ${state.runId}.`);
 }
 
-async function loadRun(runId) {
-  state.runId = runId;
-  setStatus(`Loading run ${runId}...`);
-
-  const [summaryData, learningData, policyData] = await Promise.all([
-    fetchJson(`/api/runs/${encodeURIComponent(runId)}/summary`),
-    fetchJson(`/api/runs/${encodeURIComponent(runId)}/learning`),
-    fetchJson(`/api/runs/${encodeURIComponent(runId)}/policies`)
-  ]);
-
-  state.summaryRows = summaryData.rows || [];
-  state.learning = {
-    by_algorithm: learningData.by_algorithm || [],
-    by_seed: learningData.by_seed || []
-  };
-  state.policies = policyData.policies || [];
-
-  renderSummary();
-  renderLearningCharts();
-  renderPolicyOptions();
-  matchStats.textContent = "";
-  if (charts.match) {
-    charts.match.destroy();
-    charts.match = null;
+async function loadHandHistoryChart() {
+  if (!state.runId) {
+    return;
   }
-  setStatus(`Loaded run ${runId}.`);
-}
-
-async function loadRunsAndMaybeSelectLatest() {
-  setStatus("Loading run list...");
-  const data = await fetchJson("/api/runs");
-  state.runs = data.runs || [];
-  renderRunOptions();
-
-  if (state.runs.length === 0) {
-    setStatus("No runs found. Set EXPERIMENTS_DIR or run experiments first.", true);
-    clearCharts();
-    summaryTbody.innerHTML = "";
-    summaryStats.innerHTML = "";
-    policyASelect.innerHTML = "";
-    policyBSelect.innerHTML = "";
+  if (state.handHistories.length === 0 || !handHistorySelect.value) {
+    handChartStats.textContent = "No hand-history files available for this run.";
+    destroyChart("handHistory");
     return;
   }
 
-  const selected = state.runId && state.runs.some((r) => r.id === state.runId)
-    ? state.runId
-    : state.runs[0].id;
-  runSelect.value = selected;
-  await loadRun(selected);
+  const handHistory = handHistorySelect.value;
+  const method = handMethodSelect.value;
+  const maxPoints = Math.max(20, Math.min(2000, Number(handMaxPointsInput.value || 500)));
+
+  setStatus(`Loading hand-history chart (${method})...`);
+  const url =
+    `/api/runs/${encodeURIComponent(state.runId)}/mbb?handHistory=${encodeURIComponent(handHistory)}` +
+    `&method=${encodeURIComponent(method)}&maxPoints=${maxPoints}`;
+  const result = await fetchJson(url);
+
+  renderHandHistoryChart(result);
+  setStatus(`Loaded run ${state.runId}.`);
+}
+
+async function loadRun(runId, options = {}) {
+  const { silent = false, autoLoadHandChart = true } = options;
+  if (state.loadingRunPromise) {
+    return state.loadingRunPromise;
+  }
+
+  state.loadingRunPromise = (async () => {
+    state.runId = runId;
+    if (!silent) {
+      setStatus(`Loading run ${runId}...`);
+    }
+
+    const previousHistorySelection = handHistorySelect.value;
+
+    const [summaryData, learningData, policyData, handData] = await Promise.all([
+      fetchJson(`/api/runs/${encodeURIComponent(runId)}/summary`),
+      fetchJson(`/api/runs/${encodeURIComponent(runId)}/learning`),
+      fetchJson(`/api/runs/${encodeURIComponent(runId)}/policies`),
+      fetchJson(`/api/runs/${encodeURIComponent(runId)}/hand-histories`)
+    ]);
+
+    state.summaryRows = summaryData.rows || [];
+    state.learning = {
+      by_algorithm: learningData.by_algorithm || [],
+      by_seed: learningData.by_seed || []
+    };
+    state.policies = policyData.policies || [];
+    state.handHistories = handData.files || [];
+
+    renderSummary();
+    renderLearningCharts();
+    renderPolicyOptions();
+    renderHandHistoryOptions(previousHistorySelection);
+
+    matchStats.textContent = "";
+    destroyChart("match");
+
+    if (autoLoadHandChart && state.handHistories.length > 0) {
+      await loadHandHistoryChart();
+    } else {
+      destroyChart("handHistory");
+      handChartStats.textContent = state.handHistories.length
+        ? "Select a hand-history file and click Load Hand Chart."
+        : "No hand-history files found for this run.";
+    }
+
+    if (!silent) {
+      setStatus(`Loaded run ${runId}.`);
+    }
+  })();
+
+  try {
+    await state.loadingRunPromise;
+  } finally {
+    state.loadingRunPromise = null;
+  }
+}
+
+function chooseRunId(preserveSelection = true) {
+  if (preserveSelection && state.runId && state.runs.some((r) => r.id === state.runId && !r.error)) {
+    return state.runId;
+  }
+  const healthy = state.runs.find((r) => !r.error);
+  if (healthy) {
+    return healthy.id;
+  }
+  return state.runs.length > 0 ? state.runs[0].id : null;
+}
+
+async function loadRunsAndMaybeSelectLatest(options = {}) {
+  const { preserveSelection = true, silent = false, forceBackendRefresh = false } = options;
+
+  if (state.loadingRunsPromise) {
+    return state.loadingRunsPromise;
+  }
+
+  state.loadingRunsPromise = (async () => {
+    if (!silent) {
+      setStatus("Loading run list...");
+    }
+
+    if (forceBackendRefresh) {
+      const refreshNow = await fetchJson("/api/refresh-now");
+      if (refreshNow.status) {
+        setRefreshState(refreshNow.status);
+      }
+    }
+
+    const data = await fetchJson("/api/runs");
+    state.runs = data.runs || [];
+    if (data.refresh) {
+      setRefreshState(data.refresh);
+    }
+    renderRunOptions();
+
+    if (state.runs.length === 0) {
+      setStatus("No runs found. Set EXPERIMENTS_DIR or run experiments first.", true);
+      clearCharts();
+      summaryTbody.innerHTML = "";
+      summaryStats.innerHTML = "";
+      policyASelect.innerHTML = "";
+      policyBSelect.innerHTML = "";
+      handHistorySelect.innerHTML = "";
+      handChartStats.textContent = "";
+      return;
+    }
+
+    const selected = chooseRunId(preserveSelection);
+    if (!selected) {
+      setStatus("No runnable runs found.", true);
+      return;
+    }
+
+    runSelect.value = selected;
+    await loadRun(selected, { silent: true, autoLoadHandChart: true });
+
+    if (!silent) {
+      setStatus(`Loaded run ${selected}.`);
+    }
+  })();
+
+  try {
+    await state.loadingRunsPromise;
+  } finally {
+    state.loadingRunsPromise = null;
+  }
+}
+
+async function handleRefreshEvent(payload) {
+  if (!payload || !Number.isFinite(Number(payload.version))) {
+    return;
+  }
+  const version = Number(payload.version);
+
+  if (state.refresh) {
+    state.refresh = {
+      ...state.refresh,
+      version,
+      refreshed_at: payload.refreshed_at || state.refresh.refreshed_at,
+      runs_count: payload.runs_count ?? state.refresh.runs_count
+    };
+    renderRefreshMeta();
+  }
+
+  if (version <= state.lastRefreshVersionHandled) {
+    return;
+  }
+
+  state.lastRefreshVersionHandled = version;
+  try {
+    setStatus(`Detected new artifacts (refresh v${version}). Syncing dashboard...`);
+    await loadRunsAndMaybeSelectLatest({ preserveSelection: true, silent: true, forceBackendRefresh: false });
+    setStatus(`Dashboard synced to refresh v${version}.`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+function connectRefreshStream() {
+  if (typeof EventSource === "undefined") {
+    refreshMetaLine.textContent = `${refreshMetaLine.textContent} | live stream unavailable in this browser`;
+    return;
+  }
+
+  if (state.refreshStream) {
+    state.refreshStream.close();
+    state.refreshStream = null;
+  }
+
+  const stream = new EventSource("/api/refresh-stream");
+  state.refreshStream = stream;
+
+  stream.addEventListener("hello", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload.status) {
+        setRefreshState(payload.status);
+      }
+    } catch (_error) {
+    }
+  });
+
+  stream.addEventListener("refresh", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      handleRefreshEvent(payload);
+    } catch (_error) {
+    }
+  });
+
+  stream.addEventListener("ping", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      if (state.refresh && Number.isFinite(Number(payload.version))) {
+        state.refresh.version = Number(payload.version);
+      }
+      renderRefreshMeta();
+    } catch (_error) {
+    }
+  });
+
+  stream.onerror = () => {
+    if (refreshMetaLine.textContent && !refreshMetaLine.textContent.includes("stream reconnecting")) {
+      refreshMetaLine.textContent = `${refreshMetaLine.textContent} | stream reconnecting...`;
+    }
+  };
 }
 
 refreshRunsBtn.addEventListener("click", async () => {
   try {
-    await loadRunsAndMaybeSelectLatest();
+    await loadRunsAndMaybeSelectLatest({ preserveSelection: true, silent: false, forceBackendRefresh: true });
   } catch (error) {
     setStatus(error.message, true);
   }
@@ -423,7 +786,7 @@ refreshRunsBtn.addEventListener("click", async () => {
 loadRunBtn.addEventListener("click", async () => {
   try {
     const runId = runSelect.value;
-    await loadRun(runId);
+    await loadRun(runId, { silent: false, autoLoadHandChart: true });
   } catch (error) {
     setStatus(error.message, true);
   }
@@ -437,7 +800,40 @@ runMatchBtn.addEventListener("click", async () => {
   }
 });
 
-loadRunsAndMaybeSelectLatest().catch((error) => {
-  setStatus(error.message, true);
+loadHandChartBtn.addEventListener("click", async () => {
+  try {
+    await loadHandHistoryChart();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
 });
 
+handHistorySelect.addEventListener("change", async () => {
+  if (state.handHistories.length > 0) {
+    try {
+      await loadHandHistoryChart();
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  }
+});
+
+setInterval(() => {
+  renderRefreshMeta();
+}, 1000);
+
+(async () => {
+  try {
+    const status = await fetchJson("/api/refresh-status");
+    setRefreshState(status);
+  } catch (_error) {
+  }
+
+  connectRefreshStream();
+
+  try {
+    await loadRunsAndMaybeSelectLatest({ preserveSelection: true, silent: false, forceBackendRefresh: false });
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+})();

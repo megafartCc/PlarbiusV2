@@ -101,8 +101,21 @@ button:hover {
   filter: brightness(0.95);
 }
 
+button:disabled,
+select:disabled,
+input:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 .muted {
   color: var(--muted);
+}
+
+#refreshMetaLine,
+#handChartStats,
+#matchStats {
+  font-size: 13px;
 }
 
 .summary-stats {
@@ -169,4 +182,3 @@ tbody tr:hover {
     font-size: 12px;
   }
 }
-
