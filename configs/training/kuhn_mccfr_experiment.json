@@ -1,0 +1,11 @@
+{
+  "game": "kuhn",
+  "trainer": "mccfr",
+  "iterations": 100000,
+  "seed": 1,
+  "sampling_epsilon": 0.3,
+  "log_interval": 5000,
+  "checkpoint_every": 5000,
+  "metrics_interval": 5000
+}
+

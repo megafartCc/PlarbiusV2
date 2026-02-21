@@ -1,0 +1,11 @@
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  readability-*,
+  modernize-*,
+  clang-analyzer-*
+WarningsAsErrors: ''
+HeaderFilterRegex: 'include/plarbius/.*|src/.*'
+FormatStyle: none
+

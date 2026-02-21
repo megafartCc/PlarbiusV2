@@ -1,0 +1,8 @@
+{
+  "game": "kuhn",
+  "trainer": "cfr_plus",
+  "iterations": 50000,
+  "log_interval": 5000,
+  "averaging_delay": 1000
+}
+

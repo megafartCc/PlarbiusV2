@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PlarbiusV2 Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <main class="layout">
+    <header class="hero">
+      <h1>PlarbiusV2 Training Dashboard</h1>
+      <p>Learning curves, exploitability tracking, and Pluribus-style running performance on sampled Kuhn hands.</p>
+    </header>
+
+    <section class="panel controls">
+      <div class="row">
+        <label for="runSelect">Run</label>
+        <select id="runSelect"></select>
+        <button id="refreshRunsBtn" type="button">Refresh Runs</button>
+        <button id="loadRunBtn" type="button">Load Run</button>
+      </div>
+      <div class="row muted" id="statusLine">Loading runs...</div>
+    </section>
+
+    <section class="panel">
+      <h2>Summary</h2>
+      <div id="summaryStats" class="summary-stats"></div>
+      <div class="table-wrap">
+        <table id="summaryTable">
+          <thead>
+            <tr>
+              <th>Algorithm</th>
+              <th>Seed</th>
+              <th>Iterations</th>
+              <th>Final Exploitability</th>
+              <th>NashConv</th>
+              <th>Policy</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Learning Curve (Per Seed)</h2>
+      <canvas id="seedLearningChart" height="120"></canvas>
+    </section>
+
+    <section class="panel">
+      <h2>Learning Curve (Mean ± 95% CI)</h2>
+      <canvas id="meanLearningChart" height="120"></canvas>
+    </section>
+
+    <section class="panel">
+      <h2>Final Exploitability</h2>
+      <canvas id="finalExploitabilityChart" height="110"></canvas>
+    </section>
+
+    <section class="panel">
+      <h2>Policy Match (Pluribus-Style Running Curve)</h2>
+      <div class="row">
+        <label for="policyASelect">Policy A (P0)</label>
+        <select id="policyASelect"></select>
+        <label for="policyBSelect">Policy B (P1)</label>
+        <select id="policyBSelect"></select>
+      </div>
+      <div class="row">
+        <label for="handsInput">Hands</label>
+        <input id="handsInput" type="number" min="10" step="10" value="10000">
+        <label for="seedInput">Seed</label>
+        <input id="seedInput" type="number" min="1" step="1" value="1">
+        <button id="runMatchBtn" type="button">Run Match Curve</button>
+      </div>
+      <div id="matchStats" class="muted"></div>
+      <canvas id="matchChart" height="130"></canvas>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
+
