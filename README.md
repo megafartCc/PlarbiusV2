@@ -81,6 +81,13 @@ Run controlled Kuhn experiments over multiple seeds:
   -Seeds 1,2,3 -Iterations 100000 -CheckpointEvery 5000
 ```
 
+This script now also generates per-seed sampled hand-history CSV files (`hand_history_seed*_cfr_vs_mccfr.csv`)
+for dashboard `mbb/game` + AIVAT-style plots. Control it with:
+
+- `-HandHistoryHands 20000` (default)
+- `-HandHistoryBaseSeed 1`
+- `-SkipHandHistory` to disable
+
 Quick profiling run:
 
 ```powershell

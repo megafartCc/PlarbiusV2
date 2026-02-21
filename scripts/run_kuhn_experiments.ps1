@@ -6,6 +6,9 @@ param(
   [int]$Iterations = 50000,
   [int]$CheckpointEvery = 5000,
   [double]$MccfrSamplingEpsilon = 0.3,
+  [int]$HandHistoryHands = 20000,
+  [int]$HandHistoryBaseSeed = 1,
+  [switch]$SkipHandHistory,
   [string]$OutputRoot = ""
 )
 
@@ -26,6 +29,17 @@ $presetExeMap = @{
 $exePath = Join-Path $projectRoot $presetExeMap[$Preset]
 if (-not (Test-Path $exePath)) {
   throw "Missing executable: $exePath. Build first (scripts/bootstrap.ps1 -Preset $Preset)."
+}
+
+$presetSelfplayExeMap = @{
+  "debug"       = "build\debug\plarbius_selfplay.exe"
+  "release"     = "build\release\plarbius_selfplay.exe"
+  "msvc-debug"  = "build\msvc-debug\Debug\plarbius_selfplay.exe"
+  "msvc-release"= "build\msvc-release\Release\plarbius_selfplay.exe"
+}
+$selfplayExePath = Join-Path $projectRoot $presetSelfplayExeMap[$Preset]
+if (-not $SkipHandHistory -and -not (Test-Path $selfplayExePath)) {
+  throw "Missing executable: $selfplayExePath. Build first (scripts/bootstrap.ps1 -Preset $Preset)."
 }
 
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
@@ -84,6 +98,37 @@ foreach ($algo in $algoList) {
 
     foreach ($row in $metricsRows) {
       "$algo,$seed,$($row.iteration),$($row.infosets),$($row.utility_p0),$($row.utility_p1),$($row.best_response_p0),$($row.best_response_p1),$($row.nash_conv),$($row.exploitability),$metricsPath" | Add-Content -Path $allMetricsPath
+    }
+  }
+}
+
+if (-not $SkipHandHistory -and $HandHistoryHands -gt 0) {
+  foreach ($seedText in $seedList) {
+    $seed = [int]$seedText
+    $cfrPolicy = Join-Path $runDir ("cfr__seed{0}.policy.tsv" -f $seed)
+    $mccfrPolicy = Join-Path $runDir ("mccfr_seed{0}.policy.tsv" -f $seed)
+
+    if (-not (Test-Path $cfrPolicy) -or -not (Test-Path $mccfrPolicy)) {
+      Write-Warning "Skipping hand-history for seed=$seed because matching policy files are missing."
+      continue
+    }
+
+    $historyPath = Join-Path $runDir ("hand_history_seed{0}_cfr_vs_mccfr.csv" -f $seed)
+    $historyLog = Join-Path $runDir ("hand_history_seed{0}_cfr_vs_mccfr.stdout.log" -f $seed)
+    $sampleSeed = $HandHistoryBaseSeed + $seed
+    $selfplayArgs = @(
+      "--game", "kuhn",
+      "--policy-a", $cfrPolicy,
+      "--policy-b", $mccfrPolicy,
+      "--sampled-hands", $HandHistoryHands.ToString(),
+      "--sample-seed", $sampleSeed.ToString(),
+      "--hand-history-out", $historyPath
+    )
+
+    Write-Host "Generating hand history: seed=$seed hands=$HandHistoryHands"
+    & $selfplayExePath @selfplayArgs | Tee-Object -FilePath $historyLog | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+      throw "Hand-history generation failed for seed=$seed"
     }
   }
 }

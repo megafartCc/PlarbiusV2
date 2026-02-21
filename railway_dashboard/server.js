@@ -10,6 +10,10 @@ const EXPERIMENTS_DIR = path.resolve(process.env.EXPERIMENTS_DIR || DEFAULT_EXPE
 const PORT = Number(process.env.PORT || 3000);
 const REFRESH_INTERVAL_MS = Math.max(3000, Number(process.env.REFRESH_INTERVAL_MS || 30000));
 const SSE_PING_INTERVAL_MS = 25000;
+const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS || "*")
+  .split(",")
+  .map((x) => x.trim())
+  .filter((x) => Boolean(x));
 
 const runtimeCache = {
   version: 0,
@@ -23,6 +27,16 @@ const runtimeCache = {
 const handHistoryCache = new Map();
 const sseClients = new Set();
 let refreshInFlight = false;
+
+function isOriginAllowed(origin) {
+  if (!origin) {
+    return false;
+  }
+  if (ALLOWED_ORIGINS.includes("*")) {
+    return true;
+  }
+  return ALLOWED_ORIGINS.includes(origin);
+}
 
 function assertSafeRunId(runId) {
   if (!/^[a-zA-Z0-9._-]+$/.test(runId)) {
@@ -926,6 +940,26 @@ function startScheduledRefresh() {
   ssePing.unref();
 }
 
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && isOriginAllowed(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  } else if (!origin && ALLOWED_ORIGINS.includes("*")) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+
+  next();
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/health", (_req, res) => {
@@ -1147,4 +1181,5 @@ app.listen(PORT, () => {
   console.log(`Plarbius dashboard listening on port ${PORT}`);
   console.log(`Experiments dir: ${EXPERIMENTS_DIR}`);
   console.log(`Refresh interval: ${REFRESH_INTERVAL_MS} ms`);
+  console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(",")}`);
 });

@@ -20,6 +20,44 @@ const handMaxPointsInput = document.getElementById("handMaxPointsInput");
 const loadHandChartBtn = document.getElementById("loadHandChartBtn");
 const handChartStats = document.getElementById("handChartStats");
 
+function normalizeApiBaseUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  return text.replace(/\/+$/, "");
+}
+
+function resolveApiBaseUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const fromQuery = normalizeApiBaseUrl(params.get("apiBaseUrl"));
+  if (fromQuery) {
+    window.localStorage.setItem("plarbius_api_base_url", fromQuery);
+    return fromQuery;
+  }
+
+  const fromStorage = normalizeApiBaseUrl(window.localStorage.getItem("plarbius_api_base_url"));
+  if (fromStorage) {
+    return fromStorage;
+  }
+
+  const meta = document.querySelector("meta[name='plarbius-api-base-url']");
+  const fromMeta = normalizeApiBaseUrl(meta ? meta.getAttribute("content") : "");
+  if (fromMeta) {
+    return fromMeta;
+  }
+
+  const fromGlobal = normalizeApiBaseUrl(window.PLARBIUS_API_BASE_URL);
+  return fromGlobal;
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
+
+function apiUrl(path) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return API_BASE_URL ? `${API_BASE_URL}${normalizedPath}` : normalizedPath;
+}
+
 const state = {
   runId: null,
   runs: [],
@@ -143,7 +181,8 @@ function renderRefreshMeta() {
     : refresh.next_refresh_in_ms;
   refreshMetaLine.textContent =
     `Refresh v${refresh.version} | last ${fmtTimestamp(refresh.refreshed_at)} | ` +
-    `next in ${fmtDurationMs(nextIn)} | interval ${fmtDurationMs(refresh.refresh_interval_ms)} | runs ${fmtInt(refresh.runs_count)}`;
+    `next in ${fmtDurationMs(nextIn)} | interval ${fmtDurationMs(refresh.refresh_interval_ms)} | runs ${fmtInt(refresh.runs_count)} | ` +
+    `api ${API_BASE_URL || "same-origin"}`;
 }
 
 function renderRunOptions() {
@@ -480,7 +519,7 @@ async function runMatch() {
   const seed = Math.max(1, Number(seedInput.value || 1));
 
   setStatus(`Running match simulation: ${policyA} vs ${policyB} ...`);
-  const url = `/api/runs/${encodeURIComponent(state.runId)}/match?policyA=${encodeURIComponent(policyA)}&policyB=${encodeURIComponent(policyB)}&hands=${hands}&seed=${seed}`;
+  const url = apiUrl(`/api/runs/${encodeURIComponent(state.runId)}/match?policyA=${encodeURIComponent(policyA)}&policyB=${encodeURIComponent(policyB)}&hands=${hands}&seed=${seed}`);
   const result = await fetchJson(url);
 
   const points = result.report.points || [];
@@ -559,7 +598,7 @@ async function loadHandHistoryChart() {
 
   setStatus(`Loading hand-history chart (${method})...`);
   const url =
-    `/api/runs/${encodeURIComponent(state.runId)}/mbb?handHistory=${encodeURIComponent(handHistory)}` +
+    apiUrl(`/api/runs/${encodeURIComponent(state.runId)}/mbb?handHistory=${encodeURIComponent(handHistory)}`) +
     `&method=${encodeURIComponent(method)}&maxPoints=${maxPoints}`;
   const result = await fetchJson(url);
 
@@ -582,10 +621,10 @@ async function loadRun(runId, options = {}) {
     const previousHistorySelection = handHistorySelect.value;
 
     const [summaryData, learningData, policyData, handData] = await Promise.all([
-      fetchJson(`/api/runs/${encodeURIComponent(runId)}/summary`),
-      fetchJson(`/api/runs/${encodeURIComponent(runId)}/learning`),
-      fetchJson(`/api/runs/${encodeURIComponent(runId)}/policies`),
-      fetchJson(`/api/runs/${encodeURIComponent(runId)}/hand-histories`)
+      fetchJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/summary`)),
+      fetchJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/learning`)),
+      fetchJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/policies`)),
+      fetchJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/hand-histories`))
     ]);
 
     state.summaryRows = summaryData.rows || [];
@@ -649,13 +688,13 @@ async function loadRunsAndMaybeSelectLatest(options = {}) {
     }
 
     if (forceBackendRefresh) {
-      const refreshNow = await fetchJson("/api/refresh-now");
+      const refreshNow = await fetchJson(apiUrl("/api/refresh-now"));
       if (refreshNow.status) {
         setRefreshState(refreshNow.status);
       }
     }
 
-    const data = await fetchJson("/api/runs");
+    const data = await fetchJson(apiUrl("/api/runs"));
     state.runs = data.runs || [];
     if (data.refresh) {
       setRefreshState(data.refresh);
@@ -736,7 +775,7 @@ function connectRefreshStream() {
     state.refreshStream = null;
   }
 
-  const stream = new EventSource("/api/refresh-stream");
+  const stream = new EventSource(apiUrl("/api/refresh-stream"));
   state.refreshStream = stream;
 
   stream.addEventListener("hello", (event) => {
@@ -824,7 +863,7 @@ setInterval(() => {
 
 (async () => {
   try {
-    const status = await fetchJson("/api/refresh-status");
+    const status = await fetchJson(apiUrl("/api/refresh-status"));
     setRefreshState(status);
   } catch (_error) {
   }

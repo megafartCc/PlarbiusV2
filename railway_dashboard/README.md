@@ -64,6 +64,7 @@ cd c:\out\PlarbiusV2\railway_dashboard
 npm install
 $env:EXPERIMENTS_DIR="c:\out\PlarbiusV2\experiments"
 $env:REFRESH_INTERVAL_MS="30000"
+$env:ALLOWED_ORIGINS="*"
 npm start
 ```
 
@@ -77,7 +78,27 @@ Open `http://localhost:3000`.
 4. Set env var:
    - `EXPERIMENTS_DIR=/app/experiments` (or the path where your CSV runs are available)
    - `REFRESH_INTERVAL_MS=30000` (optional, minimum 3000 ms)
+   - `ALLOWED_ORIGINS=https://<your-frontend-domain>` (comma-separated list or `*`)
 5. Ensure your experiment folders are present in that path at runtime.
+
+## Split Deploy (Railway Frontend + ngrok Backend)
+
+If backend runs on your PC via ngrok, frontend must call that absolute API host.
+
+Frontend API base resolution order:
+
+1. Query param `?apiBaseUrl=https://<backend-host>` (also saved to `localStorage`)
+2. `localStorage["plarbius_api_base_url"]`
+3. `<meta name="plarbius-api-base-url" content="...">`
+4. `window.PLARBIUS_API_BASE_URL`
+5. Same-origin fallback (default)
+
+Example:
+
+- Open your Railway frontend with:
+  - `https://<railway-frontend-domain>/?apiBaseUrl=https://<your-ngrok-domain>`
+- Run backend with:
+  - `ALLOWED_ORIGINS=https://<railway-frontend-domain>`
 
 ## Notes
 
