@@ -33,11 +33,15 @@
         <table id="summaryTable">
           <thead>
             <tr>
+              <th>Game</th>
               <th>Algorithm</th>
               <th>Seed</th>
               <th>Iterations</th>
               <th>Final Exploitability</th>
+              <th>Final Utility P0</th>
               <th>NashConv</th>
+              <th>Pairwise Score</th>
+              <th>Champion</th>
               <th>Policy</th>
             </tr>
           </thead>
@@ -47,22 +51,42 @@
     </section>
 
     <section class="panel">
-      <h2>Learning Curve (Per Seed)</h2>
+      <h2 id="seedLearningTitle">Learning Curve (Per Seed)</h2>
       <canvas id="seedLearningChart" height="120"></canvas>
     </section>
 
     <section class="panel">
-      <h2>Learning Curve (Mean +/- 95% CI)</h2>
+      <h2 id="meanLearningTitle">Learning Curve (Mean +/- 95% CI)</h2>
       <canvas id="meanLearningChart" height="120"></canvas>
     </section>
 
     <section class="panel">
-      <h2>Final Exploitability</h2>
+      <h2 id="finalMetricTitle">Final Metric</h2>
       <canvas id="finalExploitabilityChart" height="110"></canvas>
     </section>
 
     <section class="panel">
+      <h2>Leduc Pairwise Matrix (Sampled Utility P0)</h2>
+      <div id="pairwiseStats" class="muted"></div>
+      <div class="table-wrap">
+        <table id="pairwiseTable">
+          <thead>
+            <tr>
+              <th>Policy A</th>
+              <th>Policy B</th>
+              <th>Hands</th>
+              <th>Mean Utility P0</th>
+              <th>CI95</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
       <h2>Policy Match (Pluribus-Style Running Curve)</h2>
+      <div id="matchCapabilityLine" class="muted"></div>
       <div class="row">
         <label for="policyASelect">Policy A (P0)</label>
         <select id="policyASelect"></select>

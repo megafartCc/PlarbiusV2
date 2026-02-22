@@ -3,9 +3,14 @@ const refreshRunsBtn = document.getElementById("refreshRunsBtn");
 const loadRunBtn = document.getElementById("loadRunBtn");
 const statusLine = document.getElementById("statusLine");
 const refreshMetaLine = document.getElementById("refreshMetaLine");
+const seedLearningTitle = document.getElementById("seedLearningTitle");
+const meanLearningTitle = document.getElementById("meanLearningTitle");
+const finalMetricTitle = document.getElementById("finalMetricTitle");
 
 const summaryStats = document.getElementById("summaryStats");
 const summaryTbody = document.querySelector("#summaryTable tbody");
+const pairwiseStats = document.getElementById("pairwiseStats");
+const pairwiseTbody = document.querySelector("#pairwiseTable tbody");
 
 const policyASelect = document.getElementById("policyASelect");
 const policyBSelect = document.getElementById("policyBSelect");
@@ -13,6 +18,7 @@ const handsInput = document.getElementById("handsInput");
 const seedInput = document.getElementById("seedInput");
 const runMatchBtn = document.getElementById("runMatchBtn");
 const matchStats = document.getElementById("matchStats");
+const matchCapabilityLine = document.getElementById("matchCapabilityLine");
 
 const handHistorySelect = document.getElementById("handHistorySelect");
 const handMethodSelect = document.getElementById("handMethodSelect");
@@ -60,11 +66,23 @@ function apiUrl(path) {
 
 const state = {
   runId: null,
+  runGame: null,
   runs: [],
   summaryRows: [],
-  learning: { by_algorithm: [], by_seed: [] },
+  learning: {
+    by_algorithm: [],
+    by_seed: [],
+    metric_key: "exploitability",
+    metric_label: "Exploitability",
+    lower_is_better: true
+  },
   policies: [],
   handHistories: [],
+  pairwise: {
+    rows: [],
+    pairwise_matrix_file: null,
+    best_policy_file: null
+  },
   refresh: null,
   refreshStream: null,
   loadingRunsPromise: null,
@@ -110,6 +128,40 @@ function fmt(value, digits = 6) {
     return "-";
   }
   return Number(value).toFixed(digits);
+}
+
+function firstFinite(...values) {
+  for (const value of values) {
+    if (Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+  return null;
+}
+
+function finalMetricValue(row) {
+  if (!row) {
+    return null;
+  }
+  const metricKey = state.learning.metric_key || "exploitability";
+  if (metricKey === "utility_p0") {
+    return firstFinite(row.final_utility_p0, row.pairwise_score);
+  }
+  if (metricKey === "infosets") {
+    return firstFinite(row.pairwise_score, row.final_utility_p0, row.final_infosets, row.iterations);
+  }
+  return firstFinite(row.final_exploitability, row.final_utility_p0, row.pairwise_score);
+}
+
+function deriveFinalMetricConfig() {
+  const hasPairwise = state.summaryRows.some((row) => Number.isFinite(Number(row.pairwise_score)));
+  if ((state.learning.metric_key || "") === "infosets" && hasPairwise) {
+    return { label: "Pairwise Score", lower_is_better: false };
+  }
+  return {
+    label: state.learning.metric_label || "Metric",
+    lower_is_better: Boolean(state.learning.lower_is_better)
+  };
 }
 
 function fmtInt(value) {
@@ -191,7 +243,8 @@ function renderRunOptions() {
     const option = document.createElement("option");
     option.value = run.id;
     const errorSuffix = run.error ? " [error]" : "";
-    option.textContent = `${run.id}${errorSuffix} (summary:${run.summary_rows}, metrics:${run.metrics_rows}, hh:${run.hand_history_count})`;
+    const gameTag = run.game ? ` ${run.game}` : "";
+    option.textContent = `${run.id}${gameTag}${errorSuffix} (summary:${run.summary_rows}, metrics:${run.metrics_rows}, pairwise:${run.pairwise_rows}, hh:${run.hand_history_count})`;
     runSelect.appendChild(option);
   });
 }
@@ -201,41 +254,53 @@ function renderSummary() {
   if (state.summaryRows.length === 0) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 6;
+    td.colSpan = 10;
     td.textContent = "No summary rows found in this run.";
     tr.appendChild(td);
     summaryTbody.appendChild(tr);
   } else {
     state.summaryRows.forEach((row) => {
+      const game = row.game || state.runGame || "-";
       const tr = document.createElement("tr");
       tr.innerHTML = `
+        <td>${game}</td>
         <td>${row.algorithm || "-"}</td>
         <td>${row.seed ?? "-"}</td>
         <td>${row.iterations ?? "-"}</td>
         <td>${fmt(row.final_exploitability)}</td>
+        <td>${fmt(row.final_utility_p0)}</td>
         <td>${fmt(row.final_nash_conv)}</td>
+        <td>${fmt(row.pairwise_score)}</td>
+        <td>${row.is_champion ? "yes" : "-"}</td>
         <td>${row.policy_file || "-"}</td>
       `;
       summaryTbody.appendChild(tr);
     });
   }
 
+  const finalMetric = deriveFinalMetricConfig();
+  const metricLabel = finalMetric.label;
+  const lowerIsBetter = finalMetric.lower_is_better;
   const algoGroups = new Map();
   state.summaryRows.forEach((row) => {
     const key = row.algorithm || "unknown";
     if (!algoGroups.has(key)) {
       algoGroups.set(key, []);
     }
-    const value = Number(row.final_exploitability);
-    if (Number.isFinite(value)) {
+    const value = finalMetricValue(row);
+    if (value !== null) {
       algoGroups.get(key).push(value);
     }
   });
 
   const totalRows = state.summaryRows.length;
   const bestRow = [...state.summaryRows]
-    .filter((r) => Number.isFinite(Number(r.final_exploitability)))
-    .sort((a, b) => Number(a.final_exploitability) - Number(b.final_exploitability))[0];
+    .filter((r) => finalMetricValue(r) !== null)
+    .sort((a, b) => {
+      const left = finalMetricValue(a);
+      const right = finalMetricValue(b);
+      return lowerIsBetter ? left - right : right - left;
+    })[0];
 
   const algoCards = [];
   for (const [algo, values] of algoGroups.entries()) {
@@ -245,11 +310,15 @@ function renderSummary() {
     const mean = values.reduce((a, b) => a + b, 0) / values.length;
     algoCards.push(`
       <div class="summary-pill">
-        <div class="k">${algo} mean final exploitability</div>
+        <div class="k">${algo} mean final ${metricLabel.toLowerCase()}</div>
         <div class="v">${fmt(mean)}</div>
       </div>
     `);
   }
+
+  const bestText = bestRow
+    ? `${bestRow.algorithm} seed ${bestRow.seed}: ${fmt(finalMetricValue(bestRow))}`
+    : "-";
 
   summaryStats.innerHTML = `
     <div class="summary-pill">
@@ -257,12 +326,16 @@ function renderSummary() {
       <div class="v">${state.runId || "-"}</div>
     </div>
     <div class="summary-pill">
+      <div class="k">Game</div>
+      <div class="v">${state.runGame || "-"}</div>
+    </div>
+    <div class="summary-pill">
       <div class="k">Summary rows</div>
       <div class="v">${totalRows}</div>
     </div>
     <div class="summary-pill">
-      <div class="k">Best row (min exploitability)</div>
-      <div class="v">${bestRow ? `${bestRow.algorithm} seed ${bestRow.seed}: ${fmt(bestRow.final_exploitability)}` : "-"}</div>
+      <div class="k">Best row (${lowerIsBetter ? "min" : "max"} ${metricLabel.toLowerCase()})</div>
+      <div class="v">${bestText}</div>
     </div>
     ${algoCards.join("")}
   `;
@@ -272,6 +345,14 @@ function renderLearningCharts() {
   const seedCtx = document.getElementById("seedLearningChart");
   const meanCtx = document.getElementById("meanLearningChart");
   const finalCtx = document.getElementById("finalExploitabilityChart");
+  const learningMetricLabel = state.learning.metric_label || "Metric";
+  const finalMetric = deriveFinalMetricConfig();
+  const finalMetricLabel = finalMetric.label;
+  const finalMetricLabelLower = finalMetricLabel.toLowerCase();
+
+  seedLearningTitle.textContent = `Learning Curve (Per Seed, ${learningMetricLabel})`;
+  meanLearningTitle.textContent = `Learning Curve (Mean +/- 95% CI, ${learningMetricLabel})`;
+  finalMetricTitle.textContent = `Final ${finalMetricLabel}`;
 
   destroyChart("seedLearning");
   destroyChart("meanLearning");
@@ -279,7 +360,7 @@ function renderLearningCharts() {
 
   const seedDatasets = state.learning.by_seed.map((series) => ({
     label: `${series.algorithm} seed ${series.seed}`,
-    data: series.points.map((p) => ({ x: p.iteration, y: p.exploitability })),
+    data: series.points.map((p) => ({ x: p.iteration, y: p.value })),
     borderColor: algoColor(series.algorithm, 0.4),
     backgroundColor: algoColor(series.algorithm, 0.4),
     pointRadius: 2,
@@ -297,7 +378,7 @@ function renderLearningCharts() {
       },
       scales: {
         x: { type: "linear", title: { display: true, text: "Iteration" } },
-        y: { title: { display: true, text: "Exploitability" } }
+        y: { title: { display: true, text: learningMetricLabel } }
       }
     }
   });
@@ -350,13 +431,13 @@ function renderLearningCharts() {
       },
       scales: {
         x: { type: "linear", title: { display: true, text: "Iteration" } },
-        y: { title: { display: true, text: "Mean Exploitability" } }
+        y: { title: { display: true, text: `Mean ${learningMetricLabel}` } }
       }
     }
   });
 
   const labels = state.summaryRows.map((row) => `${row.algorithm} seed ${row.seed}`);
-  const values = state.summaryRows.map((row) => Number(row.final_exploitability));
+  const values = state.summaryRows.map((row) => finalMetricValue(row));
   const colors = state.summaryRows.map((row) => algoColor(row.algorithm, 0.8));
 
   charts.finalExploitability = new Chart(finalCtx, {
@@ -365,7 +446,7 @@ function renderLearningCharts() {
       labels,
       datasets: [
         {
-          label: "Final exploitability",
+          label: `Final ${finalMetricLabelLower}`,
           data: values,
           backgroundColor: colors
         }
@@ -375,7 +456,7 @@ function renderLearningCharts() {
       responsive: true,
       plugins: { legend: { display: false } },
       scales: {
-        y: { title: { display: true, text: "Exploitability" } }
+        y: { title: { display: true, text: finalMetricLabel } }
       }
     }
   });
@@ -393,6 +474,49 @@ function renderPolicyOptions() {
   } else if (state.policies.length === 1) {
     policyASelect.selectedIndex = 0;
     policyBSelect.selectedIndex = 0;
+  }
+}
+
+function renderPairwiseMatrix() {
+  pairwiseTbody.innerHTML = "";
+  const rows = state.pairwise.rows || [];
+  if (rows.length === 0) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 5;
+    td.textContent = state.runGame === "leduc"
+      ? "No pairwise matrix found for this run."
+      : "Pairwise matrix is currently used for Leduc runs.";
+    tr.appendChild(td);
+    pairwiseTbody.appendChild(tr);
+    pairwiseStats.textContent = "";
+    return;
+  }
+
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${row.policy_a || "-"}</td>
+      <td>${row.policy_b || "-"}</td>
+      <td>${fmtInt(row.sampled_hands)}</td>
+      <td>${fmt(row.sampled_utility_mean_p0)}</td>
+      <td>${fmt(row.sampled_ci95)}</td>
+    `;
+    pairwiseTbody.appendChild(tr);
+  }
+
+  pairwiseStats.textContent =
+    `rows=${fmtInt(rows.length)} | matrix=${state.pairwise.pairwise_matrix_file || "-"} | ` +
+    `best_policy=${state.pairwise.best_policy_file || "-"}`;
+}
+
+function renderMatchAvailability() {
+  const isKuhn = (state.runGame || "").toLowerCase() === "kuhn";
+  runMatchBtn.disabled = !isKuhn;
+  if (!isKuhn) {
+    matchCapabilityLine.textContent = "Interactive match endpoint currently supports game=kuhn only.";
+  } else {
+    matchCapabilityLine.textContent = "";
   }
 }
 
@@ -513,13 +637,17 @@ async function runMatch() {
   if (!state.runId) {
     return;
   }
+  if ((state.runGame || "").toLowerCase() !== "kuhn") {
+    setStatus("Match simulation endpoint currently supports only Kuhn runs.", true);
+    return;
+  }
   const policyA = policyASelect.value;
   const policyB = policyBSelect.value;
   const hands = Math.max(10, Number(handsInput.value || 10000));
   const seed = Math.max(1, Number(seedInput.value || 1));
 
   setStatus(`Running match simulation: ${policyA} vs ${policyB} ...`);
-  const url = apiUrl(`/api/runs/${encodeURIComponent(state.runId)}/match?policyA=${encodeURIComponent(policyA)}&policyB=${encodeURIComponent(policyB)}&hands=${hands}&seed=${seed}`);
+  const url = apiUrl(`/api/runs/${encodeURIComponent(state.runId)}/match?policyA=${encodeURIComponent(policyA)}&policyB=${encodeURIComponent(policyB)}&hands=${hands}&seed=${seed}&game=kuhn`);
   const result = await fetchJson(url);
 
   const points = result.report.points || [];
@@ -620,25 +748,37 @@ async function loadRun(runId, options = {}) {
 
     const previousHistorySelection = handHistorySelect.value;
 
-    const [summaryData, learningData, policyData, handData] = await Promise.all([
+    const [summaryData, learningData, policyData, handData, pairwiseData] = await Promise.all([
       fetchJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/summary`)),
       fetchJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/learning`)),
       fetchJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/policies`)),
-      fetchJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/hand-histories`))
+      fetchJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/hand-histories`)),
+      fetchJson(apiUrl(`/api/runs/${encodeURIComponent(runId)}/pairwise`))
     ]);
 
+    state.runGame = summaryData.game || learningData.game || policyData.game || pairwiseData.game || null;
     state.summaryRows = summaryData.rows || [];
     state.learning = {
       by_algorithm: learningData.by_algorithm || [],
-      by_seed: learningData.by_seed || []
+      by_seed: learningData.by_seed || [],
+      metric_key: learningData.metric_key || "exploitability",
+      metric_label: learningData.metric_label || "Exploitability",
+      lower_is_better: Boolean(learningData.lower_is_better)
     };
     state.policies = policyData.policies || [];
     state.handHistories = handData.files || [];
+    state.pairwise = {
+      rows: pairwiseData.rows || [],
+      pairwise_matrix_file: pairwiseData.pairwise_matrix_file || null,
+      best_policy_file: pairwiseData.best_policy_file || summaryData.best_policy_file || null
+    };
 
     renderSummary();
     renderLearningCharts();
     renderPolicyOptions();
     renderHandHistoryOptions(previousHistorySelection);
+    renderPairwiseMatrix();
+    renderMatchAvailability();
 
     matchStats.textContent = "";
     destroyChart("match");

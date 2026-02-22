@@ -166,13 +166,20 @@ function parseSummaryFromDir(runDir) {
     const policyPath = resolveArtifactPath(runDir, row.policy_path);
     const checkpointPath = resolveArtifactPath(runDir, row.checkpoint_path);
     const stdoutPath = resolveArtifactPath(runDir, row.stdout_log);
+    const pairwiseMatrixPath = resolveArtifactPath(runDir, row.pairwise_matrix_path);
+    const bestPolicyPath = resolveArtifactPath(runDir, row.best_policy_path);
     return {
       algorithm: row.algorithm || "",
+      game: row.game || "",
       seed: toNumber(row.seed),
       iterations: toNumber(row.iterations),
       checkpoint_every: toNumber(row.checkpoint_every),
       final_exploitability: toNumber(row.final_exploitability),
       final_nash_conv: toNumber(row.final_nash_conv),
+      final_utility_p0: toNumber(row.final_utility_p0),
+      final_ci95: toNumber(row.final_ci95),
+      pairwise_score: toNumber(row.pairwise_score),
+      is_champion: String(row.is_champion || "").toLowerCase() === "true",
       metrics_path: metricsPath,
       metrics_file: metricsPath ? path.basename(metricsPath) : null,
       policy_path: policyPath,
@@ -180,7 +187,11 @@ function parseSummaryFromDir(runDir) {
       checkpoint_path: checkpointPath,
       checkpoint_file: checkpointPath ? path.basename(checkpointPath) : null,
       stdout_log: stdoutPath,
-      stdout_file: stdoutPath ? path.basename(stdoutPath) : null
+      stdout_file: stdoutPath ? path.basename(stdoutPath) : null,
+      pairwise_matrix_path: pairwiseMatrixPath,
+      pairwise_matrix_file: pairwiseMatrixPath ? path.basename(pairwiseMatrixPath) : null,
+      best_policy_path: bestPolicyPath,
+      best_policy_file: bestPolicyPath ? path.basename(bestPolicyPath) : null
     };
   });
   return { summaryPath, rows };
@@ -190,6 +201,7 @@ function parseAllMetricsFromDir(runDir) {
   const metricsPath = path.join(runDir, "all_metrics.csv");
   const rows = parseCsvFile(metricsPath).map((row) => ({
     algorithm: row.algorithm || "",
+    game: row.game || "",
     seed: toNumber(row.seed),
     iteration: toNumber(row.iteration),
     infosets: toNumber(row.infosets),
@@ -199,16 +211,63 @@ function parseAllMetricsFromDir(runDir) {
     best_response_p1: toNumber(row.best_response_p1),
     nash_conv: toNumber(row.nash_conv),
     exploitability: toNumber(row.exploitability),
+    metric_label: row.metric_label || "",
     metrics_path: resolveArtifactPath(runDir, row.metrics_path),
     metrics_file: row.metrics_path ? path.basename(row.metrics_path) : null
   }));
   return { metricsPath, rows };
 }
 
+function parsePairwiseMatrixFromDir(runDir, summaryRows) {
+  const summaryPairwise = (summaryRows || [])
+    .map((row) => row.pairwise_matrix_path)
+    .find((x) => Boolean(x));
+  const fallback = path.join(runDir, "pairwise_matrix.csv");
+  const pairwisePath = summaryPairwise || (fs.existsSync(fallback) ? fallback : null);
+  if (!pairwisePath || !fs.existsSync(pairwisePath)) {
+    return { pairwisePath: null, rows: [] };
+  }
+
+  const rows = parseCsvFile(pairwisePath).map((row) => ({
+    policy_a: row.policy_a || "",
+    algorithm_a: row.algorithm_a || "",
+    seed_a: toNumber(row.seed_a),
+    policy_b: row.policy_b || "",
+    algorithm_b: row.algorithm_b || "",
+    seed_b: toNumber(row.seed_b),
+    sampled_hands: toNumber(row.sampled_hands),
+    sample_seed: toNumber(row.sample_seed),
+    utility_p0: toNumber(row.utility_p0),
+    sampled_utility_mean_p0: toNumber(row.sampled_utility_mean_p0),
+    sampled_ci95: toNumber(row.sampled_ci95),
+    hand_history_path: resolveArtifactPath(runDir, row.hand_history_path),
+    hand_history_file: row.hand_history_path ? path.basename(row.hand_history_path) : null,
+    stdout_log: resolveArtifactPath(runDir, row.stdout_log),
+    stdout_file: row.stdout_log ? path.basename(row.stdout_log) : null
+  }));
+  return { pairwisePath, rows };
+}
+
 function aggregateLearning(metricsRows) {
+  const hasExploitability = metricsRows.some((row) => row.exploitability !== null);
+  const hasUtility = metricsRows.some((row) => row.utility_p0 !== null);
+  const hasInfosets = metricsRows.some((row) => row.infosets !== null);
+
+  const metric = hasExploitability
+    ? { key: "exploitability", label: "Exploitability", lower_is_better: true }
+    : hasUtility
+      ? { key: "utility_p0", label: "Utility P0", lower_is_better: false }
+      : hasInfosets
+        ? { key: "infosets", label: "Infosets", lower_is_better: false }
+        : { key: "", label: "Value", lower_is_better: false };
+
   const grouped = new Map();
   for (const row of metricsRows) {
-    if (row.iteration === null || row.exploitability === null) {
+    if (!metric.key) {
+      continue;
+    }
+    const value = row[metric.key];
+    if (row.iteration === null || value === null) {
       continue;
     }
     const algo = row.algorithm || "unknown";
@@ -219,7 +278,7 @@ function aggregateLearning(metricsRows) {
     if (!byIter.has(row.iteration)) {
       byIter.set(row.iteration, []);
     }
-    byIter.get(row.iteration).push(row.exploitability);
+    byIter.get(row.iteration).push(value);
   }
 
   const byAlgorithm = [];
@@ -252,7 +311,11 @@ function aggregateLearning(metricsRows) {
 
   const bySeedKey = new Map();
   for (const row of metricsRows) {
-    if (row.iteration === null || row.exploitability === null) {
+    if (!metric.key) {
+      continue;
+    }
+    const value = row[metric.key];
+    if (row.iteration === null || value === null) {
       continue;
     }
     const key = `${row.algorithm}|${row.seed}`;
@@ -265,7 +328,7 @@ function aggregateLearning(metricsRows) {
     }
     bySeedKey.get(key).points.push({
       iteration: row.iteration,
-      exploitability: row.exploitability
+      value
     });
   }
 
@@ -275,7 +338,7 @@ function aggregateLearning(metricsRows) {
     points: series.points.sort((a, b) => a.iteration - b.iteration)
   }));
 
-  return { byAlgorithm, bySeed };
+  return { byAlgorithm, bySeed, metric };
 }
 
 function walkDir(dirPath, maxDepth = 3, currentDepth = 0) {
@@ -341,9 +404,12 @@ function computeRunSignaturePart(runRecord) {
   return {
     id: runRecord.id,
     updated_at: runRecord.updated_at,
+    game: runRecord.game,
     summary_rows: runRecord.summary_rows,
     metrics_rows: runRecord.metrics_rows,
+    pairwise_rows: runRecord.pairwise_rows,
     policies: runRecord.policies,
+    best_policy_file: runRecord.best_policy_file,
     hand_histories: runRecord.hand_histories.map((h) => ({
       relative_path: h.relative_path,
       updated_at: h.updated_at,
@@ -357,19 +423,39 @@ function buildRunRecord(runId) {
   const runStat = fs.statSync(runDir);
   const { summaryPath, rows: summaryRows } = parseSummaryFromDir(runDir);
   const { metricsPath, rows: metricsRows } = parseAllMetricsFromDir(runDir);
+  const { pairwisePath, rows: pairwiseRows } = parsePairwiseMatrixFromDir(runDir, summaryRows);
   const policies = listPolicyFilesFromDir(runDir, summaryRows);
   const handHistories = listHandHistoryFilesFromDir(runDir);
+  const gameFromSummary = summaryRows.find((row) => Boolean(row.game));
+  const gameFromMetrics = metricsRows.find((row) => Boolean(row.game));
+  const game = gameFromSummary
+    ? gameFromSummary.game
+    : gameFromMetrics
+      ? gameFromMetrics.game
+      : runId.toLowerCase().startsWith("leduc_")
+        ? "leduc"
+        : "kuhn";
+  const championRow = summaryRows.find((row) => row.is_champion && row.best_policy_file);
+  const bestPolicyFile = championRow
+    ? championRow.best_policy_file
+    : summaryRows.find((row) => row.best_policy_file)?.best_policy_file || null;
 
   return {
     id: runId,
+    game,
     run_dir: runDir,
     updated_at: runStat.mtime.toISOString(),
     summary_path: summaryPath,
     metrics_path: metricsPath,
+    pairwise_matrix_path: pairwisePath,
+    pairwise_matrix_file: pairwisePath ? path.basename(pairwisePath) : null,
     summary_rows: summaryRows.length,
     metrics_rows: metricsRows.length,
+    pairwise_rows: pairwiseRows.length,
     summary_rows_data: summaryRows,
     metrics_rows_data: metricsRows,
+    pairwise_rows_data: pairwiseRows,
+    best_policy_file: bestPolicyFile,
     policies,
     hand_histories: handHistories
   };
@@ -1016,9 +1102,12 @@ app.get("/api/runs", (_req, res) => {
     ensureCacheReady();
     const runs = runtimeCache.runs.map((run) => ({
       id: run.id,
+      game: run.game || null,
       summary_rows: run.summary_rows || 0,
       metrics_rows: run.metrics_rows || 0,
+      pairwise_rows: run.pairwise_rows || 0,
       policy_count: run.policies ? run.policies.length : 0,
+      best_policy_file: run.best_policy_file || null,
       hand_history_count: run.hand_histories ? run.hand_histories.length : 0,
       updated_at: run.updated_at,
       error: run.error || null
@@ -1034,6 +1123,8 @@ app.get("/api/runs/:runId/summary", (req, res) => {
     const run = getRunRecord(req.params.runId);
     res.json({
       run_id: run.id,
+      game: run.game || null,
+      best_policy_file: run.best_policy_file || null,
       rows: run.summary_rows_data
     });
   } catch (error) {
@@ -1046,6 +1137,7 @@ app.get("/api/runs/:runId/metrics", (req, res) => {
     const run = getRunRecord(req.params.runId);
     res.json({
       run_id: run.id,
+      game: run.game || null,
       rows: run.metrics_rows_data
     });
   } catch (error) {
@@ -1059,8 +1151,12 @@ app.get("/api/runs/:runId/learning", (req, res) => {
     const learning = aggregateLearning(run.metrics_rows_data);
     res.json({
       run_id: run.id,
+      game: run.game || null,
       by_algorithm: learning.byAlgorithm,
-      by_seed: learning.bySeed
+      by_seed: learning.bySeed,
+      metric_key: learning.metric.key,
+      metric_label: learning.metric.label,
+      lower_is_better: learning.metric.lower_is_better
     });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -1069,10 +1165,28 @@ app.get("/api/runs/:runId/learning", (req, res) => {
 
 app.get("/api/runs/:runId/policies", (req, res) => {
   try {
+    const run = getRunRecord(req.params.runId);
     const policies = listPoliciesForRun(req.params.runId);
     res.json({
       run_id: req.params.runId,
+      game: run.game || null,
+      best_policy_file: run.best_policy_file || null,
       policies
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/runs/:runId/pairwise", (req, res) => {
+  try {
+    const run = getRunRecord(req.params.runId);
+    res.json({
+      run_id: run.id,
+      game: run.game || null,
+      pairwise_matrix_file: run.pairwise_matrix_file || null,
+      best_policy_file: run.best_policy_file || null,
+      rows: run.pairwise_rows_data || []
     });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -1084,6 +1198,7 @@ app.get("/api/runs/:runId/hand-histories", (req, res) => {
     const run = getRunRecord(req.params.runId);
     res.json({
       run_id: run.id,
+      game: run.game || null,
       files: run.hand_histories
     });
   } catch (error) {
@@ -1106,6 +1221,7 @@ app.get("/api/runs/:runId/mbb", (req, res) => {
 
     const response = {
       run_id: run.id,
+      game: run.game || null,
       hand_history_file: historyFile.file,
       hand_history_relative_path: historyFile.relative_path,
       method,
