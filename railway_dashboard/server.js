@@ -174,6 +174,7 @@ function parseSummaryFromDir(runDir) {
       seed: toNumber(row.seed),
       iterations: toNumber(row.iterations),
       checkpoint_every: toNumber(row.checkpoint_every),
+      final_infosets: toNumber(row.final_infosets),
       final_exploitability: toNumber(row.final_exploitability),
       final_nash_conv: toNumber(row.final_nash_conv),
       final_utility_p0: toNumber(row.final_utility_p0),

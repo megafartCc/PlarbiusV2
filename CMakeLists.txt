@@ -14,9 +14,14 @@ add_library(plarbius_core STATIC
   src/cfr/infoset_table.cpp
   src/cfr/mccfr_trainer.cpp
   src/cfr/regret_matcher.cpp
+  src/eval/exploitability.cpp
   src/eval/kuhn_exploitability.cpp
+  src/eval/leduc_exploitability.cpp
   src/eval/selfplay_evaluator.cpp
   src/game/action.cpp
+  src/games/hunl/hunl_action_abstraction.cpp
+  src/games/hunl/hunl_bucket_config.cpp
+  src/games/hunl/hunl_game.cpp
   src/games/leduc/leduc_game.cpp
   src/games/kuhn/kuhn_game.cpp
   src/infra/logger.cpp
@@ -42,6 +47,9 @@ endif()
 
 add_executable(plarbius_train apps/train_blueprint_main.cpp)
 target_link_libraries(plarbius_train PRIVATE plarbius_core)
+
+add_executable(plarbius_train_hunl apps/train_hunl_main.cpp)
+target_link_libraries(plarbius_train_hunl PRIVATE plarbius_core)
 
 add_executable(plarbius_selfplay apps/selfplay_main.cpp)
 target_link_libraries(plarbius_selfplay PRIVATE plarbius_core)
@@ -69,6 +77,10 @@ if(PLARBIUS_BUILD_TESTS)
   target_link_libraries(test_kuhn_exploitability PRIVATE plarbius_core)
   add_test(NAME kuhn_exploitability COMMAND test_kuhn_exploitability)
 
+  add_executable(test_leduc_exploitability tests/leduc_exploitability_test.cpp)
+  target_link_libraries(test_leduc_exploitability PRIVATE plarbius_core)
+  add_test(NAME leduc_exploitability COMMAND test_leduc_exploitability)
+
   add_executable(test_policy_io tests/policy_io_test.cpp)
   target_link_libraries(test_policy_io PRIVATE plarbius_core)
   add_test(NAME policy_io COMMAND test_policy_io)
@@ -80,4 +92,8 @@ if(PLARBIUS_BUILD_TESTS)
   add_executable(test_mccfr_importance tests/mccfr_importance_test.cpp)
   target_link_libraries(test_mccfr_importance PRIVATE plarbius_core)
   add_test(NAME mccfr_importance COMMAND test_mccfr_importance)
+
+  add_executable(test_hunl_smoke tests/hunl_smoke_test.cpp)
+  target_link_libraries(test_hunl_smoke PRIVATE plarbius_core)
+  add_test(NAME hunl_smoke COMMAND test_hunl_smoke)
 endif()

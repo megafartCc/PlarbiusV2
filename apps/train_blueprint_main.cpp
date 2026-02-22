@@ -16,6 +16,7 @@
 #include "plarbius/cfr/regret_matcher.hpp"
 #include "plarbius/cfr/training_config.hpp"
 #include "plarbius/eval/kuhn_exploitability.hpp"
+#include "plarbius/eval/leduc_exploitability.hpp"
 #include "plarbius/game/game.hpp"
 #include "plarbius/games/kuhn/kuhn_game.hpp"
 #include "plarbius/games/leduc/leduc_game.hpp"
@@ -33,12 +34,13 @@ struct CliOptions {
   plarbius::cfr::TrainerConfig config;
 };
 
-class KuhnMetricsCsvWriter {
+class GameMetricsCsvWriter {
  public:
-  KuhnMetricsCsvWriter(std::string path,
+  GameMetricsCsvWriter(std::string path,
                        std::string algo,
+                       std::string game,
                        std::uint64_t seed)
-      : path_(std::move(path)), algo_(std::move(algo)), seed_(seed) {
+      : path_(std::move(path)), algo_(std::move(algo)), game_(std::move(game)), seed_(seed) {
     out_.open(path_, std::ios::trunc);
     if (!out_) {
       throw std::runtime_error("Failed to open metrics file: " + path_);
@@ -51,8 +53,16 @@ class KuhnMetricsCsvWriter {
     if (iteration == last_iteration_) {
       return;
     }
-    const auto report = plarbius::eval::EvaluateKuhnExploitability(table);
-    out_ << algo_ << ",kuhn," << seed_ << ',' << iteration << ',' << table.Size() << ','
+    plarbius::eval::ExploitabilityReport report;
+    if (game_ == "kuhn") {
+      report = plarbius::eval::EvaluateKuhnExploitability(table);
+    } else if (game_ == "leduc") {
+      report = plarbius::eval::EvaluateLeducExploitability(table);
+    } else {
+      throw std::runtime_error("Unsupported game for metrics writer: " + game_);
+    }
+
+    out_ << algo_ << ',' << game_ << ',' << seed_ << ',' << iteration << ',' << table.Size() << ','
          << report.utility_p0 << ',' << report.utility_p1 << ',' << report.best_response_p0 << ','
          << report.best_response_p1 << ',' << report.nash_conv << ',' << report.exploitability
          << '\n';
@@ -63,6 +73,7 @@ class KuhnMetricsCsvWriter {
  private:
   std::string path_;
   std::string algo_;
+  std::string game_;
   std::uint64_t seed_;
   std::ofstream out_;
   std::uint64_t last_iteration_ = 0;
@@ -307,15 +318,11 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  std::shared_ptr<KuhnMetricsCsvWriter> metrics_writer;
+  std::shared_ptr<GameMetricsCsvWriter> metrics_writer;
   plarbius::cfr::TrainingMetricsCallback metrics_callback = nullptr;
   if (!options.metrics_out_path.empty()) {
-    if (options.game != "kuhn") {
-      std::cerr << "--metrics-out currently supports only --game kuhn.\n";
-      return 1;
-    }
-    metrics_writer =
-        std::make_shared<KuhnMetricsCsvWriter>(options.metrics_out_path, options.algo, options.config.seed);
+    metrics_writer = std::make_shared<GameMetricsCsvWriter>(
+        options.metrics_out_path, options.algo, options.game, options.config.seed);
     metrics_callback = [metrics_writer](std::uint64_t iteration,
                                         const plarbius::cfr::InfosetTable& table) {
       metrics_writer->Write(iteration, table);
@@ -347,9 +354,10 @@ int main(int argc, char** argv) {
     std::cout << "policy_out=" << options.policy_out_path << '\n';
   }
 
-  if (options.game == "kuhn") {
-    const auto report = plarbius::eval::EvaluateKuhnExploitability(result_table);
-    std::cout << "\nKuhn exploitability report\n";
+  if (options.game == "kuhn" || options.game == "leduc") {
+    const auto report = options.game == "kuhn" ? plarbius::eval::EvaluateKuhnExploitability(result_table)
+                                               : plarbius::eval::EvaluateLeducExploitability(result_table);
+    std::cout << '\n' << (options.game == "kuhn" ? "Kuhn" : "Leduc") << " exploitability report\n";
     std::cout << "utility_p0=" << std::fixed << std::setprecision(6) << report.utility_p0 << '\n';
     std::cout << "utility_p1=" << std::fixed << std::setprecision(6) << report.utility_p1 << '\n';
     std::cout << "best_response_p0=" << std::fixed << std::setprecision(6) << report.best_response_p0
@@ -360,7 +368,7 @@ int main(int argc, char** argv) {
     std::cout << "exploitability=" << std::fixed << std::setprecision(6) << report.exploitability
               << '\n';
   } else {
-    std::cout << "\nExploitability evaluator is currently implemented for Kuhn only.\n";
+    std::cout << "\nExploitability evaluator is not available for this game.\n";
   }
 
   return 0;

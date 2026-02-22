@@ -104,10 +104,41 @@ function setStatus(message, isError = false) {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url);
-  const data = await response.json();
+  let response;
+  try {
+    response = await fetch(url);
+  } catch (_error) {
+    throw new Error(`Network error requesting ${url}. Check backend/ngrok availability and apiBaseUrl.`);
+  }
+
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  const text = await response.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (_error) {
+      data = null;
+    }
+  }
+
+  if (!data) {
+    const snippet = String(text || "").trim().slice(0, 120).replace(/\s+/g, " ");
+    const looksHtml =
+      contentType.includes("text/html") ||
+      snippet.toLowerCase().startsWith("<!doctype") ||
+      snippet.toLowerCase().startsWith("<html");
+    if (looksHtml) {
+      const healthUrl = apiUrl("/api/health");
+      throw new Error(
+        `Expected JSON but got HTML from ${url}. Usually apiBaseUrl points to frontend (or proxy fallback), not backend. Verify ${healthUrl} returns JSON.`
+      );
+    }
+    throw new Error(`Invalid JSON response from ${url}${snippet ? `: ${snippet}` : ""}`);
+  }
+
   if (!response.ok) {
-    throw new Error(data.error || `Request failed: ${url}`);
+    throw new Error(data.error || `Request failed (${response.status}): ${url}`);
   }
   return data;
 }

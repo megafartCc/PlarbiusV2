@@ -81,8 +81,6 @@ foreach ($algo in $algoList) {
     $checkpointPath = Join-Path $runDir "${prefix}.ckpt.tsv"
     $stdoutLog = Join-Path $runDir "${prefix}.stdout.log"
 
-    "algorithm,game,seed,iteration,infosets,utility_p0,utility_p1,best_response_p0,best_response_p1,nash_conv,exploitability,metrics_path,metric_label" | Set-Content -Path $metricsPath
-
     $cliArgs = @(
       $Iterations.ToString(),
       "--algo", $algo,
@@ -90,6 +88,8 @@ foreach ($algo in $algoList) {
       "--seed", $seed.ToString(),
       "--checkpoint", $checkpointPath,
       "--checkpoint-every", $CheckpointEvery.ToString(),
+      "--metrics-out", $metricsPath,
+      "--metrics-interval", $CheckpointEvery.ToString(),
       "--policy-out", $policyPath,
       "--log-interval", $CheckpointEvery.ToString(),
       "--no-strategy-print"
@@ -121,16 +121,16 @@ foreach ($algo in $algoList) {
       throw "Missing policy file after run: $policyPath"
     }
 
-    $logLines = Get-Content -Path $stdoutLog
-    foreach ($line in $logLines) {
-      $match = [regex]::Match($line, "Iteration\s+(\d+),\s*infosets=(\d+)")
-      if (-not $match.Success) {
-        continue
-      }
-      $iter = $match.Groups[1].Value
-      $infosets = $match.Groups[2].Value
-      "$algo,leduc,$seed,$iter,$infosets,,,,,,,$metricsPath,infosets" | Add-Content -Path $metricsPath
-      "$algo,leduc,$seed,$iter,$infosets,,,,,,,$metricsPath,infosets" | Add-Content -Path $allMetricsPath
+    if (-not (Test-Path $metricsPath)) {
+      throw "Missing metrics file after run: $metricsPath"
+    }
+    $metricsRows = Import-Csv -Path $metricsPath
+    if ($metricsRows.Count -eq 0) {
+      throw "No metrics rows produced: $metricsPath"
+    }
+    $final = $metricsRows[-1]
+    foreach ($row in $metricsRows) {
+      "$algo,leduc,$seed,$($row.iteration),$($row.infosets),$($row.utility_p0),$($row.utility_p1),$($row.best_response_p0),$($row.best_response_p1),$($row.nash_conv),$($row.exploitability),$metricsPath,exploitability" | Add-Content -Path $allMetricsPath
     }
 
     $trainingRows += [PSCustomObject]@{
@@ -142,8 +142,10 @@ foreach ($algo in $algoList) {
       policy_path = $policyPath
       checkpoint_path = $checkpointPath
       stdout_log = $stdoutLog
-      final_utility_p0 = $null
-      final_ci95 = $null
+      final_exploitability = $final.exploitability
+      final_nash_conv = $final.nash_conv
+      final_utility_p0 = $final.utility_p0
+      final_ci95 = ""
       pairwise_score = $null
       is_champion = $false
     }
@@ -259,17 +261,31 @@ foreach ($row in $trainingRows) {
   }
 
   $pairwiseScore = ""
+  $finalExploitability = ""
+  $finalNashConv = ""
   $finalUtilityP0 = ""
+  $finalCi95 = ""
+  if ($null -ne $row.final_exploitability) {
+    $finalExploitability = $row.final_exploitability
+  }
+  if ($null -ne $row.final_nash_conv) {
+    $finalNashConv = $row.final_nash_conv
+  }
+  if ($null -ne $row.final_utility_p0) {
+    $finalUtilityP0 = $row.final_utility_p0
+  }
+  if ($null -ne $row.final_ci95) {
+    $finalCi95 = $row.final_ci95
+  }
   $isChampionText = "false"
   if ($null -ne $scoreEntry) {
     $pairwiseScore = $scoreEntry.pairwise_score
-    $finalUtilityP0 = $scoreEntry.pairwise_score
     if ($null -ne $champion -and $scoreEntry.policy_file -eq $champion.policy_file) {
       $isChampionText = "true"
     }
   }
 
-  "$($row.algorithm),leduc,$($row.seed),$($row.iterations),$($row.checkpoint_every),,,$finalUtilityP0,,$pairwiseScore,$isChampionText,$($row.metrics_path),$($row.policy_path),$($row.checkpoint_path),$($row.stdout_log),$pairwisePath,$bestPolicyPath" | Add-Content -Path $summaryPath
+  "$($row.algorithm),leduc,$($row.seed),$($row.iterations),$($row.checkpoint_every),$finalExploitability,$finalNashConv,$finalUtilityP0,$finalCi95,$pairwiseScore,$isChampionText,$($row.metrics_path),$($row.policy_path),$($row.checkpoint_path),$($row.stdout_log),$pairwisePath,$bestPolicyPath" | Add-Content -Path $summaryPath
 }
 
 Write-Host ""

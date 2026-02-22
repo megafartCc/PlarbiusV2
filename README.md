@@ -67,7 +67,38 @@ Train on Leduc:
 ```powershell
 .\build\msvc-debug\Debug\plarbius_train.exe 50000 --algo mccfr --game leduc `
   --seed 7 --sampling-epsilon 0.2 --checkpoint data\leduc_mccfr.ckpt.tsv `
-  --checkpoint-every 5000 --policy-out data\leduc_mccfr.policy.tsv --no-strategy-print
+  --checkpoint-every 5000 --metrics-out data\leduc_mccfr.metrics.csv --metrics-interval 5000 `
+  --policy-out data\leduc_mccfr.policy.tsv --no-strategy-print
+```
+
+Train on HUNL scaffold abstraction (separate entrypoint):
+
+```powershell
+.\build\msvc-debug\Debug\plarbius_train_hunl.exe 200000 --algo mccfr --seed 7 `
+  --bucket-config configs\hunl\bucket_default.cfg `
+  --action-config configs\hunl\action_default.cfg `
+  --sampling-epsilon 0.2 --lcfr-discount --lcfr-start 5000 `
+  --checkpoint data\hunl_mccfr.ckpt.tsv --checkpoint-every 10000 `
+  --metrics-out data\hunl_mccfr.metrics.csv --metrics-interval 10000 `
+  --policy-out data\hunl_mccfr.policy.tsv --no-strategy-print
+```
+
+This HUNL module is an abstraction scaffold for architecture and pipeline development.
+Exploitability reporting for HUNL is not implemented yet.
+
+Run multi-seed HUNL scaffold experiments:
+
+```powershell
+.\scripts\run_hunl_experiments.ps1 -Preset msvc-debug -Algorithms mccfr `
+  -Seeds 1,2,3 -Iterations 300000 -CheckpointEvery 10000 `
+  -BucketConfig configs\hunl\bucket_default.cfg -ActionConfig configs\hunl\action_default.cfg
+```
+
+Run controlled Leduc experiments with pairwise scoring + champion policy:
+
+```powershell
+.\scripts\run_leduc_experiments.ps1 -Preset msvc-debug -Algorithms mccfr `
+  -Seeds 1,2,3 -Iterations 300000 -CheckpointEvery 5000 -PairwiseHands 100000
 ```
 
 Evaluate saved policies with expected-value selfplay (parallel at root chance):
@@ -110,7 +141,9 @@ It includes:
 
 - Frontend charts (`index.html`) for learning curves and final exploitability
 - Backend API (`server.js`) that reads `experiments/*/summary.csv` and `all_metrics.csv`
+- Leduc pairwise matrix + champion policy metadata
 - Kuhn policy-vs-policy running match curve with confidence interval
+- Hand-history `mbb/game` charting with AIVAT-style variance reduction
 
 Run locally:
 
@@ -123,7 +156,7 @@ npm start
 
 ## Immediate Next Build Targets
 
-1. Add Leduc exploitability / best-response evaluator.
-2. Add richer abstraction layers for larger game trees.
+1. Add configurable action/card abstraction for larger game trees.
+2. Add reproducible benchmark sweeps (seed matrix + auto summary comparisons).
 3. Add distributed trainer workers and checkpoint sharding.
 4. Add online depth-limited resolving stage.
