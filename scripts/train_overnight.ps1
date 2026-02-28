@@ -88,7 +88,8 @@ $ServerArgs = @(
     "--policy-out", $PolicyPath,
     "--checkpoint", $CheckpointPath,
     "--checkpoint-every", "1000000",
-    "--ipc-server", $ServerName
+    "--ipc-server", $ServerName,
+    "--max-street", "flop"
 )
 
 # If a checkpoint exists, resume from it
@@ -115,7 +116,8 @@ for ($i = 0; $i -lt $Workers; $i++) {
         "--action-config", $ActionConfigPath,
         "--ipc-worker", $ServerName,
         "--threads", "1",
-        "--seed", "$i"
+        "--seed", "$i",
+        "--max-street", "flop"
     )
     $P = Start-Process -FilePath $TrainExe -ArgumentList $WorkerArgs -NoNewWindow -PassThru
     $WorkerProcesses += $P

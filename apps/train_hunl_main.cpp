@@ -926,6 +926,22 @@ CliOptions ParseCli(int argc, char** argv) {
       options.print_strategy = false;
     } else if (flag == "--strategy-print") {
       options.print_strategy = true;
+    } else if (flag == "--max-street") {
+      if (index >= argc) {
+        throw std::invalid_argument("Missing value for --max-street.");
+      }
+      const std::string street_name = ToLower(argv[index++]);
+      if (street_name == "preflop") {
+        options.game_config.max_street = 0;
+      } else if (street_name == "flop") {
+        options.game_config.max_street = 1;
+      } else if (street_name == "turn") {
+        options.game_config.max_street = 2;
+      } else if (street_name == "river") {
+        options.game_config.max_street = 3;
+      } else {
+        throw std::invalid_argument("Invalid --max-street value. Expected: preflop, flop, turn, river.");
+      }
     } else if (flag == "--help" || flag == "-h") {
       PrintUsage();
       std::exit(0);
