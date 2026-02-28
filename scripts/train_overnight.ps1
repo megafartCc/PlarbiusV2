@@ -71,6 +71,12 @@ $MetricsPath = "$DataDir\metrics.csv"
 $PolicyPath = "$DataDir\policy.bin"
 $CheckpointPath = "$DataDir\checkpoint.bin"
 
+# Clean up stale shutdown signal from previous crashed runs
+if (Test-Path ".\.stop_ipc_server") {
+    Write-Host "Removing stale .stop_ipc_server file from previous run..." -ForegroundColor Yellow
+    Remove-Item ".\.stop_ipc_server" -Force
+}
+
 # 2a. Start the Master Server
 Write-Host "Starting IPC Server..."
 $ServerArgs = @(
