@@ -1,5 +1,5 @@
 param(
-    [string]$ConfigName = "bucket_superhuman",
+    [string]$ConfigName = "bucket_superhuman_32gb",
     [int]$Hours = 20,
     [int]$Workers = [Environment]::ProcessorCount
 )
@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $BuildDir = ".\build\msvc-release\Release"
 $DataDir = ".\data\$ConfigName"
 $ConfigPath = ".\configs\hunl\$ConfigName.cfg"
-$ActionConfigPath = ".\configs\hunl\action_default.cfg"
+$ActionConfigPath = ".\configs\hunl\action_32gb.cfg"
 
 if (-Not (Test-Path $ConfigPath)) {
     Write-Host "Error: Config file not found at $ConfigPath" -ForegroundColor Red
