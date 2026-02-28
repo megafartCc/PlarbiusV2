@@ -1034,6 +1034,8 @@ int main(int argc, char** argv) {
     std::cout << "Waiting for workers to send updates. Press Ctrl+C to terminate and save policy.\n";
     
     auto last_log = std::chrono::steady_clock::now();
+    auto last_checkpoint = std::chrono::steady_clock::now();
+    constexpr int kCheckpointIntervalMinutes = 30;
     
     while (!g_quit) {
       std::size_t processed = server.ProcessPending(table);
@@ -1042,6 +1044,22 @@ int main(int argc, char** argv) {
       if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log).count() >= 10) {
         std::cout << "IPC Server (" << options.ipc_server_name << "): " << table.Size() << " infosets tracked.\n";
         last_log = now;
+      }
+      
+      // Periodic checkpoint save every 30 minutes
+      if (!options.trainer_config.checkpoint_path.empty() &&
+          std::chrono::duration_cast<std::chrono::minutes>(now - last_checkpoint).count() >= kCheckpointIntervalMinutes) {
+        const auto ckpt_size = table.Size();
+        if (ckpt_size > 0) {
+          std::cout << "[CHECKPOINT] Saving " << ckpt_size << " infosets to " << options.trainer_config.checkpoint_path << "...\n";
+          try {
+            plarbius::cfr::InfosetCheckpointIo::Save(table, options.trainer_config.checkpoint_path);
+            std::cout << "[CHECKPOINT] Save complete.\n";
+          } catch (const std::exception& ex) {
+            std::cerr << "[CHECKPOINT] Save failed: " << ex.what() << "\n";
+          }
+        }
+        last_checkpoint = now;
       }
       
       if (std::filesystem::exists(".stop_ipc_server")) {
@@ -1058,6 +1076,18 @@ int main(int argc, char** argv) {
       }
     }
     std::cout << "\nTerminating IPC server session.\n";
+    
+    // Save a final checkpoint BEFORE attempting the expensive BuildAveragePolicy
+    if (!options.trainer_config.checkpoint_path.empty() && table.Size() > 0) {
+      std::cout << "[FINAL CHECKPOINT] Saving " << table.Size() << " infosets before policy build...\n";
+      try {
+        plarbius::cfr::InfosetCheckpointIo::Save(table, options.trainer_config.checkpoint_path);
+        std::cout << "[FINAL CHECKPOINT] Save complete. Data is safe even if policy build fails.\n";
+      } catch (const std::exception& ex) {
+        std::cerr << "[FINAL CHECKPOINT] Save failed: " << ex.what() << "\n";
+      }
+    }
+    
     result_table = std::move(table);
   } else {
     if (!options.ipc_worker_name.empty()) {

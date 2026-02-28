@@ -153,8 +153,8 @@ finally {
         Write-Host "Triggering Server policy save via .stop_ipc_server file..." -ForegroundColor Yellow
         New-Item -ItemType File -Force -Path ".\.stop_ipc_server" | Out-Null
         
-        Write-Host "Waiting up to 5 minutes for Server to save enormous tables to disk..."
-        $ServerProcess.WaitForExit(300000)
+        Write-Host "Waiting up to 60 minutes for Server to save enormous tables to disk..."
+        $ServerProcess.WaitForExit(3600000)
         
         if (-not $ServerProcess.HasExited) {
             Write-Host "Server took too long to save, forcing kill." -ForegroundColor Red
